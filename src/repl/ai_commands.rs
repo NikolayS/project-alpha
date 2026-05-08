@@ -425,6 +425,7 @@ pub(super) async fn dispatch_ai_command(
         || input.starts_with("/np ")
         || input.starts_with("/n ")
         || input.starts_with("/ash")
+        || input.starts_with("/top")
         || input == "/rpg";
     if !is_budget_exempt && check_token_budget(settings) {
         return None;
@@ -528,6 +529,26 @@ pub(super) async fn dispatch_ai_command(
         }
         #[cfg(target_arch = "wasm32")]
         rpg_eprintln!("/ash requires ratatui which is not available on wasm32-unknown-unknown");
+
+    // /top — live TUI Postgres monitor (S1: activity view).
+    } else if input == "/top" || input.starts_with("/top ") {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::IsTerminal;
+            let raw_args = input.strip_prefix("/top").map_or("", str::trim);
+            let top_args = crate::top::TopArgs::parse(raw_args);
+            if !top_args.once && !std::io::stdout().is_terminal() {
+                rpg_eprintln!(
+                    "/top requires an interactive terminal (use `--once` for a snapshot)"
+                );
+                return None;
+            }
+            if let Err(e) = crate::top::run_top(client, settings, top_args).await {
+                rpg_eprintln!("/top: {e}");
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        rpg_eprintln!("/top requires ratatui which is not available on wasm32-unknown-unknown");
 
     // /sql — switch to SQL input mode.
     } else if input == "/sql" {

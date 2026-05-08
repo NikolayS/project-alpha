@@ -1850,6 +1850,16 @@ pub async fn exec_command(
         }
         return 0;
     }
+    if sql.trim_start().starts_with('/') {
+        // Slash (rpg-extension) command in -c mode. Mirrors the interactive
+        // REPL's branch around `dispatch_ai_command`; without this `rpg
+        // --command "/top --once"` would fall through to SQL execution and
+        // raise a syntax error.
+        let mut tx = TxState::default();
+        let interpolated = settings.vars.interpolate(sql.trim());
+        let _ = dispatch_ai_command(&interpolated, client, params, settings, &mut tx).await;
+        return 0;
+    }
     let mut tx = TxState::default();
     i32::from(!execute_query(client, sql, settings, &mut tx).await)
 }

@@ -62,6 +62,8 @@ mod setup;
 mod ssh_tunnel;
 mod statusline;
 mod term;
+#[cfg(not(target_arch = "wasm32"))]
+mod top;
 mod update;
 mod vars;
 // WASM browser support: WebSocket connector and wasm-bindgen entry point.
