@@ -40,7 +40,7 @@ Sleep 3s
 #     IdleTx light yellow, …) and uses ':' as the Type:Event delimiter
 #   • qtime warn (>1 s yellow) / crit (>30 s red)
 #   • sticky table header — rows scroll, header stays
-Type "/top"
+Type "/top --show-keys"
 Sleep 1500ms
 Enter
 Sleep 6s

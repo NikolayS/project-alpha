@@ -25,11 +25,13 @@ use crate::top::theme::Theme;
 /// Render the activity table into `area`. The caller is responsible for
 /// passing only the body rectangle (header/tabs/footer are drawn outside).
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let mut title_spans = vec![Span::styled(" Activity ", theme.title)];
-    title_spans.push(Span::styled(
-        row_count_caption(app.snapshot.as_ref()),
-        theme.muted,
-    ));
+    // Body title: caption only — the view name lives in the tabs strip
+    // above, no point repeating "Activity" twice. Extended-mode badge
+    // still hangs off the body since it's a per-view setting.
+    let mut title_spans = vec![
+        Span::raw(" "),
+        Span::styled(row_count_caption(app.snapshot.as_ref()), theme.muted),
+    ];
     if app.extended {
         title_spans.push(Span::styled("  [extended] ", theme.title));
     }

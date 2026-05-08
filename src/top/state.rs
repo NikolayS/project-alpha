@@ -5,17 +5,16 @@
 //! ring buffer for pause-and-rewind.
 //!
 //! S1 keys handled by [`App::handle_key`]:
-//!   - `q`, `Esc`, `Ctrl-C`         → exit (Esc cancels an open prompt first)
-//!   - `Up` / `Down`                → move row cursor (sticky-header scroll)
-//!   - `PageUp` / `PageDown`        → jump cursor by page
-//!   - `Home` / `End`               → first / last row
-//!   - `Space`                      → force an immediate sampler tick
-//!   - `←` / `→` (also `<` / `>`)   → cycle active sort column
-//!   - `r`                          → reverse sort direction
-//!   - `e`                          → toggle extended columns (app/client/backend)
-//!   - `s`                          → set refresh delay (prompt 0.1–60 s)
-//!   - `k` / `K`                    → cancel / terminate selected backend
-//!                                    (opens a footer y/N confirm prompt)
+//! - `q`, `Esc`, `Ctrl-C` — exit (Esc cancels an open prompt first)
+//! - `Up` / `Down` — move row cursor (sticky-header scroll)
+//! - `PageUp` / `PageDown` — jump cursor by page
+//! - `Home` / `End` — first / last row
+//! - `Space` — force an immediate sampler tick
+//! - `←` / `→` (also `<` / `>`) — cycle active sort column
+//! - `r` — reverse sort direction
+//! - `e` — toggle extended columns (app/client/backend)
+//! - `s` — set refresh delay (prompt 0.1–60 s)
+//! - `k` / `K` — cancel / terminate selected backend (footer y/N confirm)
 //!
 //! When a prompt is open, every other key feeds it (digits, `.`, Backspace,
 //! Enter to apply, Esc to cancel). When the kill confirm is open, `y`/`Y`
@@ -342,8 +341,14 @@ pub struct App {
     pub sort_column: SortColumn,
     /// `true` when sorting descending (largest first); toggled by `r`.
     pub sort_desc: bool,
-    /// Most recent keystroke and its overlay expiration time. Read by the
-    /// renderer to draw a temporary key indicator in the corner.
+    /// When `true`, every keystroke seeds [`App::last_key`] so the
+    /// renderer can draw a temporary key-press overlay. Off by default —
+    /// it's a recording aid (used by `demos/top-demo.tape` via
+    /// `--show-keys`), not something an interactive user wants flashing
+    /// in their face.
+    pub show_keys: bool,
+    /// Most recent keystroke and its overlay expiration time. Populated
+    /// only when `show_keys` is on.
     pub last_key: Option<KeyOverlay>,
     /// Set by `Space` to ask the event loop to break out of its poll
     /// window and run a sampler tick immediately (matches `top`'s
@@ -389,6 +394,7 @@ impl Default for App {
             prompt: None,
             sort_column: SortColumn::Qtime,
             sort_desc: true,
+            show_keys: false,
             last_key: None,
             force_refresh: false,
             kill_confirm: None,
@@ -482,9 +488,10 @@ impl App {
     /// renderers/tests can observe it.
     pub fn handle_key(&mut self, key: KeyEvent, page_size: usize) -> bool {
         // Record the keystroke for the corner overlay before any branch
-        // returns. Suppressed inside the prompt so each typed digit does
-        // not flash in the overlay (the prompt buffer is the indicator).
-        if self.prompt.is_none() {
+        // returns. Off unless --show-keys is set (recording aid only).
+        // Suppressed inside the prompt so each typed digit does not
+        // flash in the overlay — the prompt buffer is the indicator.
+        if self.show_keys && self.prompt.is_none() {
             self.note_key(&key);
         }
 
@@ -1178,6 +1185,7 @@ mod tests {
     #[test]
     fn pressing_a_key_seeds_the_overlay_with_its_label() {
         let mut app = App::new();
+        app.show_keys = true;
         app.handle_key(key(KeyCode::Down), 10);
         let ko = app
             .fresh_key_overlay()
@@ -1196,11 +1204,23 @@ mod tests {
     #[test]
     fn key_overlay_is_suppressed_inside_prompt() {
         let mut app = App::new();
+        app.show_keys = true;
         app.open_refresh_prompt();
         // open_refresh_prompt itself does not touch the overlay; subsequent
         // typed chars should not surface in the corner.
         app.handle_key(key(KeyCode::Char('5')), 10);
         assert!(app.fresh_key_overlay().is_none());
+    }
+
+    #[test]
+    fn key_overlay_off_by_default() {
+        let mut app = App::new();
+        // No show_keys = no overlay even after a key press.
+        app.handle_key(key(KeyCode::Char('e')), 10);
+        assert!(
+            app.fresh_key_overlay().is_none(),
+            "key overlay must default to off"
+        );
     }
 
     // -- strftime helper -----------------------------------------------------
@@ -1255,6 +1275,7 @@ mod tests {
     #[test]
     fn fresh_key_overlay_expires_after_ttl() {
         let mut app = App::new();
+        app.show_keys = true;
         app.handle_key(key(KeyCode::Char('e')), 10);
         assert!(app.fresh_key_overlay().is_some());
 

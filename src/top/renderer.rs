@@ -301,25 +301,44 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 // Key-press overlay
 // ---------------------------------------------------------------------------
 
-fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, theme: &Theme) {
+fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Theme) {
     let Some(ko) = app.fresh_key_overlay() else {
         return;
     };
-    // ` ⌨ <label> ` with one cell of padding either side.
-    let label = format!(" ⌨ {} ", ko.label);
+
+    // 3-row solid-yellow billboard at the lower-left of the body. The
+    // height + padded label make the keystroke visually loud without
+    // per-character ASCII art. Yellow bg + bold-black fg pops on every
+    // theme we tested. (Plain spaces instead of half-blocks because some
+    // gif-rendering pipelines drop the ▀/▄ glyphs.)
+    let label = format!(" ⌨  {}  ", ko.label);
     let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    if body_area.width <= label_chars + 2 || body_area.height < 2 {
+    let inner_w = label_chars;
+    let box_h: u16 = 3;
+    if body_area.width <= inner_w + 2 || body_area.height < box_h + 1 {
         return;
     }
-    // Pin to the upper-right corner of the body, just inside the border.
-    let x = body_area.x + body_area.width.saturating_sub(label_chars + 1);
-    let y = body_area.y;
-    let area = Rect::new(x, y, label_chars, 1);
-    let style = theme
-        .title
-        .add_modifier(Modifier::REVERSED)
+
+    // Lower-left corner with one cell of padding from the body edges.
+    let x = body_area.x + 1;
+    let y = body_area
+        .y
+        .saturating_add(body_area.height)
+        .saturating_sub(box_h + 1);
+    let area = Rect::new(x, y, inner_w, box_h);
+
+    let fill = Style::default()
+        .bg(ratatui::style::Color::Yellow)
+        .fg(ratatui::style::Color::Black)
         .add_modifier(Modifier::BOLD);
-    frame.render_widget(Paragraph::new(Span::styled(label, style)), area);
+
+    let blank: String = " ".repeat(inner_w as usize);
+    let lines = vec![
+        Line::from(Span::styled(blank.clone(), fill)),
+        Line::from(Span::styled(label, fill)),
+        Line::from(Span::styled(blank, fill)),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 // ---------------------------------------------------------------------------
@@ -787,16 +806,30 @@ mod tests {
     }
 
     #[test]
-    fn key_overlay_appears_after_a_recent_keypress() {
+    fn key_overlay_appears_after_a_recent_keypress_when_enabled() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = App::new();
         app.set_snapshot(fixture_snapshot());
-        // Press Down — sets `last_key` with the "↓" label and a fresh TTL.
+        app.show_keys = true;
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 10);
         let buf = render_into(140, 30, &app);
         let dump = buffer_to_string(&buf);
-        assert!(dump.contains("⌨ ↓"), "expected ⌨ ↓ overlay: {dump}");
+        assert!(dump.contains("⌨"), "expected ⌨ overlay: {dump}");
+        assert!(dump.contains('↓'), "expected ↓ label in overlay: {dump}");
+    }
+
+    #[test]
+    fn key_overlay_off_by_default_in_render() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        // Default: no overlay even after a keypress.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 10);
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(!dump.contains("⌨"), "overlay must default to off: {dump}");
     }
 
     #[test]
@@ -805,6 +838,7 @@ mod tests {
 
         let mut app = App::new();
         app.set_snapshot(fixture_snapshot());
+        app.show_keys = true;
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE), 10);
         // Force-expire the overlay.
         app.last_key.as_mut().unwrap().expires_at = std::time::Instant::now()

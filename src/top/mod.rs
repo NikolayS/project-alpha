@@ -93,6 +93,11 @@ pub struct TopArgs {
     /// Strftime-style format used for the timestamp prefix in `--batch`
     /// mode. `None` uses [`state::DEFAULT_TS_FORMAT`] (ISO 8601 UTC).
     pub ts_format: Option<String>,
+    /// Show a billboard-style overlay flashing the most recent
+    /// keystroke. Off by default — it's a recording aid, not something
+    /// an interactive user wants every keypress flashing on screen.
+    /// The demo tape passes `--show-keys` so the gif explains itself.
+    pub show_keys: bool,
 }
 
 impl TopArgs {
@@ -121,6 +126,7 @@ impl TopArgs {
                         out.ts_format = Some(val.to_owned());
                     }
                 }
+                "--show-keys" => out.show_keys = true,
                 _ => {}
             }
         }
@@ -154,6 +160,7 @@ pub async fn run_top(
     if let Some(secs) = args.refresh_secs {
         app.refresh_secs = secs;
     }
+    app.show_keys = args.show_keys;
     let theme = Theme::default_theme();
 
     let _guard = TerminalGuard::new()?;
