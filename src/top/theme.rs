@@ -62,16 +62,23 @@ impl Theme {
         let extension_purple = rgb_or(truecolor, 0xBE, 0x96, 0xFF, Color::LightMagenta);
         let other_gray = rgb_or(truecolor, 0xB4, 0xB4, 0xB4, Color::Gray);
 
+        // Chrome (border, muted labels, footer) stays subtle but visible
+        // on dark terminals. `DarkGray` was hard to see on many themes so
+        // we lift it to a brighter gray; truecolor terminals get an exact
+        // RGB tuned for low contrast without disappearing.
+        let chrome_subtle = rgb_or(truecolor, 0x9b, 0x9d, 0xa6, Color::Gray);
+        let chrome_dim = rgb_or(truecolor, 0x6e, 0x71, 0x80, Color::Gray);
+
         Self {
-            border: Style::default().fg(Color::DarkGray),
+            border: Style::default().fg(chrome_subtle),
             title: Style::default().add_modifier(Modifier::BOLD),
-            muted: Style::default().fg(Color::DarkGray),
+            muted: Style::default().fg(chrome_dim),
             header: Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
             header_row: Style::default().bg(Color::Black),
             selected: Style::default().add_modifier(Modifier::REVERSED),
-            footer: Style::default().fg(Color::Gray),
+            footer: Style::default().fg(chrome_subtle),
             status_ok: Style::default().fg(Color::Green),
             status_stale: Style::default().fg(Color::Yellow),
 

@@ -56,12 +56,72 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if inner.height < 2 {
+        return;
+    }
     let snap = app.snapshot.as_ref();
-    let lines = vec![
-        build_summary_line(snap, theme),
-        build_counts_line(snap, app, theme),
-    ];
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Two inner rows. Each row is itself split into a left and right
+    // paragraph so that the most-actionable values (clock + connection
+    // LED) anchor to the right edge instead of leaving the right side of
+    // the frame blank on wide terminals.
+    let row0 = Rect::new(inner.x, inner.y, inner.width, 1);
+    let row1 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+
+    let row0_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(20), Constraint::Length(28)])
+        .split(row0);
+    let row1_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(20), Constraint::Length(20)])
+        .split(row1);
+
+    frame.render_widget(
+        Paragraph::new(build_summary_line(snap, theme)),
+        row0_split[0],
+    );
+    frame.render_widget(
+        Paragraph::new(build_clock_line(snap, theme)).alignment(ratatui::layout::Alignment::Right),
+        row0_split[1],
+    );
+    frame.render_widget(
+        Paragraph::new(build_counts_line(snap, app, theme)),
+        row1_split[0],
+    );
+    frame.render_widget(
+        Paragraph::new(build_status_line(snap, app, theme))
+            .alignment(ratatui::layout::Alignment::Right),
+        row1_split[1],
+    );
+}
+
+fn build_clock_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> {
+    if let Some(s) = snap {
+        Line::from(vec![
+            Span::styled("@ ", theme.muted),
+            Span::raw(format_clock_utc(s.ts)),
+            Span::styled(" UTC ", theme.muted),
+        ])
+    } else {
+        Line::from(Span::styled("connecting…", theme.muted))
+    }
+}
+
+fn build_status_line<'a>(snap: Option<&'a Snapshot>, app: &'a App, theme: &'a Theme) -> Line<'a> {
+    let dot = if app.stale_ticks == 0 && snap.is_some() {
+        Span::styled("●", theme.status_ok)
+    } else {
+        Span::styled("●", theme.status_stale)
+    };
+    if app.stale_ticks > 0 && snap.is_some() {
+        Line::from(vec![
+            Span::styled(format!("stale {} ", app.stale_ticks), theme.status_stale),
+            dot,
+            Span::raw(" "),
+        ])
+    } else {
+        Line::from(vec![dot, Span::raw(" ")])
+    }
 }
 
 fn build_summary_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> {
@@ -82,25 +142,15 @@ fn build_summary_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<
             Span::raw(recovery),
             Span::styled("  uptime ", theme.muted),
             Span::raw(format_uptime(s.server.uptime_secs)),
-            Span::styled("  @ ", theme.muted),
-            Span::raw(format_clock_utc(s.ts)),
-            Span::styled(" UTC", theme.muted),
         ])
     } else {
         Line::from(Span::styled("connecting…", theme.muted))
     }
 }
 
-fn build_counts_line<'a>(snap: Option<&'a Snapshot>, app: &'a App, theme: &'a Theme) -> Line<'a> {
-    let connection_dot = if app.stale_ticks == 0 && snap.is_some() {
-        Span::styled("● ", theme.status_ok)
-    } else {
-        Span::styled("● ", theme.status_stale)
-    };
-
-    let mut spans = vec![connection_dot];
+fn build_counts_line<'a>(snap: Option<&'a Snapshot>, _app: &'a App, theme: &'a Theme) -> Line<'a> {
     if let Some(s) = snap {
-        spans.extend([
+        Line::from(vec![
             Span::styled("active ", theme.muted),
             Span::raw(s.server.active.to_string()),
             Span::styled("  idle-in-tx ", theme.muted),
@@ -120,20 +170,13 @@ fn build_counts_line<'a>(snap: Option<&'a Snapshot>, app: &'a App, theme: &'a Th
             Span::raw(s.server.deadlocks_total.to_string()),
             Span::styled("  temp-files ", theme.muted),
             Span::raw(s.server.temp_files_total.to_string()),
-        ]);
-        if app.stale_ticks > 0 {
-            spans.push(Span::styled(
-                format!("  stale {}", app.stale_ticks),
-                theme.status_stale,
-            ));
-        }
+        ])
     } else {
-        spans.push(Span::styled(
+        Line::from(Span::styled(
             "active –  idle-in-tx –  wait –  total –",
             theme.muted,
-        ));
+        ))
     }
-    Line::from(spans)
 }
 
 /// Format a non-negative second count as a compact human string, or `"-"`
@@ -270,6 +313,8 @@ fn build_default_footer(theme: &Theme) -> Line<'_> {
         Span::styled("quit  ", theme.footer),
         Span::styled("↑↓ ", theme.title),
         Span::styled("move  ", theme.footer),
+        Span::styled("Space ", theme.title),
+        Span::styled("refresh  ", theme.footer),
         Span::styled("</> ", theme.title),
         Span::styled("sort  ", theme.footer),
         Span::styled("r ", theme.title),

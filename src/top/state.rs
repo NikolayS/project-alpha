@@ -228,7 +228,13 @@ pub struct KeyOverlay {
 }
 
 /// UI state for `/top`. Pure data — no I/O, no side effects.
+///
+/// The `#[allow]` covers the half-dozen independent UI flags (`extended`,
+/// `sort_desc`, `force_refresh`, `should_exit`, …). They are orthogonal
+/// one-shot signals, not states of a state machine, so collapsing them
+/// into an enum would cost clarity for no benefit.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub view: View,
     pub snapshot: Option<Snapshot>,
@@ -258,6 +264,10 @@ pub struct App {
     /// Most recent keystroke and its overlay expiration time. Read by the
     /// renderer to draw a temporary key indicator in the corner.
     pub last_key: Option<KeyOverlay>,
+    /// Set by `Space` to ask the event loop to break out of its poll
+    /// window and run a sampler tick immediately (matches `top`'s
+    /// space-bar behaviour). Cleared by the loop after the forced tick.
+    pub force_refresh: bool,
 }
 
 impl Default for App {
@@ -275,6 +285,7 @@ impl Default for App {
             sort_column: SortColumn::Qtime,
             sort_desc: true,
             last_key: None,
+            force_refresh: false,
         }
     }
 }
@@ -394,6 +405,7 @@ impl App {
             KeyCode::Char('<' | ',') => self.cycle_sort(-1),
             KeyCode::Char('>' | '.') => self.cycle_sort(1),
             KeyCode::Char('r') => self.sort_desc = !self.sort_desc,
+            KeyCode::Char(' ') => self.force_refresh = true,
             _ => {}
         }
         self.should_exit
@@ -880,6 +892,14 @@ mod tests {
         app.handle_key(key(KeyCode::Char('r')), 10);
         assert_eq!(app.sort_column, col);
         assert_eq!(app.sort_desc, !was_desc);
+    }
+
+    #[test]
+    fn space_sets_force_refresh_flag() {
+        let mut app = App::new();
+        assert!(!app.force_refresh);
+        app.handle_key(key(KeyCode::Char(' ')), 10);
+        assert!(app.force_refresh);
     }
 
     #[test]

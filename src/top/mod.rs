@@ -162,6 +162,7 @@ pub async fn run_top(
 
     'outer: loop {
         // 1. Sampler tick.
+        app.force_refresh = false;
         match sampler::tick(client, SAMPLE_TIMEOUT_MS).await {
             Ok(TickResult::Ok(snap)) => app.set_snapshot(*snap),
             Ok(TickResult::Missed) => app.note_stale(),
@@ -174,6 +175,8 @@ pub async fn run_top(
         // 3. Drain key/mouse events until the next refresh deadline.
         // The deadline is recomputed each tick so an interactive change to
         // `app.refresh_secs` (via the `s` prompt) takes effect immediately.
+        // `Space` short-circuits the wait by setting `app.force_refresh` —
+        // matches `top`'s "redisplay now" convention.
         let deadline = Instant::now() + Duration::from_secs_f64(app.refresh_secs);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -191,6 +194,9 @@ pub async fn run_top(
                     }
                     // Redraw after every state-changing key for snappy UX.
                     terminal.draw(|f| renderer::draw(f, &app, &theme))?;
+                    if app.force_refresh {
+                        break;
+                    }
                 }
                 Event::Resize(_, _) => {
                     terminal.draw(|f| renderer::draw(f, &app, &theme))?;
