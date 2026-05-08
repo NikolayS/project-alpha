@@ -347,7 +347,7 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
     let pad_total = inner_w_usize.saturating_sub(label_chars);
     let pad_left = pad_total / 2;
     let pad_right = pad_total - pad_left;
-    let middle = format!("{}{}{}", " ".repeat(pad_left), label, " ".repeat(pad_right),);
+    let middle = format!("{}{}{}", " ".repeat(pad_left), label, " ".repeat(pad_right));
     let blank: String = " ".repeat(inner_w_usize);
 
     let lines = vec![
