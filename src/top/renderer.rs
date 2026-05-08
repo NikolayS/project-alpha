@@ -318,9 +318,61 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
         return;
     };
 
+    let fill = Style::default()
+        .bg(ratatui::style::Color::Yellow)
+        .fg(ratatui::style::Color::Black)
+        .add_modifier(Modifier::BOLD);
+
     let label = chunky_arrow(&ko.label);
-    let label_w = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    let inner_w = (label_w + KEY_OVERLAY_PADDING).max(KEY_OVERLAY_MIN_BOX_W);
+    let chars: Vec<char> = label.chars().collect();
+
+    // Single-character labels get a 5×5 block-letter glyph (rendered
+    // at ~5× normal cell size). Multi-character labels (`PgDn`, `Esc`,
+    // `Home`, …) and any single char without a hand-drawn glyph fall
+    // back to the centred plain-text rendering.
+    let big_glyph = if chars.len() == 1 {
+        super::keyfont::glyph(chars[0])
+    } else {
+        None
+    };
+
+    let (lines, inner_w) = if let Some(g) = big_glyph {
+        // 5×5 glyph + 3-cell horizontal padding either side. The five
+        // glyph rows fill the entire box height (5 rows), no top /
+        // bottom padding rows needed.
+        const SIDE_PAD: usize = 3;
+        let inner_w_usize = super::keyfont::GLYPH_W + 2 * SIDE_PAD;
+        let pad: String = " ".repeat(SIDE_PAD);
+        let lines: Vec<Line> = g
+            .iter()
+            .map(|row| {
+                let s = format!("{pad}{row}{pad}");
+                Line::from(Span::styled(s, fill))
+            })
+            .collect();
+        let inner_w = u16::try_from(inner_w_usize).unwrap_or(u16::MAX);
+        (lines, inner_w)
+    } else {
+        // Plain-text fallback: centre the label on the middle row of
+        // a 5-row blank yellow box.
+        let label_w = u16::try_from(chars.len()).unwrap_or(u16::MAX);
+        let inner_w = (label_w + KEY_OVERLAY_PADDING).max(KEY_OVERLAY_MIN_BOX_W);
+        let inner_w_usize = inner_w as usize;
+        let pad_total = inner_w_usize.saturating_sub(chars.len());
+        let pad_left = pad_total / 2;
+        let pad_right = pad_total - pad_left;
+        let middle = format!("{}{}{}", " ".repeat(pad_left), label, " ".repeat(pad_right));
+        let blank: String = " ".repeat(inner_w_usize);
+        let lines = vec![
+            Line::from(Span::styled(blank.clone(), fill)),
+            Line::from(Span::styled(blank.clone(), fill)),
+            Line::from(Span::styled(middle, fill)),
+            Line::from(Span::styled(blank.clone(), fill)),
+            Line::from(Span::styled(blank, fill)),
+        ];
+        (lines, inner_w)
+    };
+
     let box_h: u16 = KEY_OVERLAY_BOX_H;
     if body_area.width <= inner_w + 2 || body_area.height < box_h + 1 {
         return;
@@ -337,26 +389,6 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
         .saturating_sub(box_h + 1);
     let area = Rect::new(x, y, inner_w, box_h);
 
-    let fill = Style::default()
-        .bg(ratatui::style::Color::Yellow)
-        .fg(ratatui::style::Color::Black)
-        .add_modifier(Modifier::BOLD);
-
-    let inner_w_usize = inner_w as usize;
-    let label_chars = label.chars().count();
-    let pad_total = inner_w_usize.saturating_sub(label_chars);
-    let pad_left = pad_total / 2;
-    let pad_right = pad_total - pad_left;
-    let middle = format!("{}{}{}", " ".repeat(pad_left), label, " ".repeat(pad_right));
-    let blank: String = " ".repeat(inner_w_usize);
-
-    let lines = vec![
-        Line::from(Span::styled(blank.clone(), fill)),
-        Line::from(Span::styled(blank.clone(), fill)),
-        Line::from(Span::styled(middle, fill)),
-        Line::from(Span::styled(blank.clone(), fill)),
-        Line::from(Span::styled(blank, fill)),
-    ];
     frame.render_widget(Paragraph::new(lines), area);
 }
 

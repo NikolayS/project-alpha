@@ -18,6 +18,7 @@
 //! sparklines, and snapshot export land in S2–S7 per
 //! `.samo/spec/top/SPEC.md`.
 
+pub mod keyfont;
 pub mod renderer;
 pub mod sampler;
 pub mod sql;
