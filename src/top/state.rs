@@ -1,18 +1,19 @@
 //! `/top` UI state — pure data, no I/O.
 //!
-//! The state machine is intentionally tiny in S1: a single Activity view, a
-//! row cursor, an optional last-error string, and an exit flag. Later sprints
-//! will extend `View`, add filter/sort, and grow the ring buffer for
-//! pause-and-rewind. All UI rendering reads from this struct; it should
-//! remain the single source of truth.
+//! All UI rendering reads from this struct; it is the single source of
+//! truth. Later sprints will extend `View`, add filter/sort, and grow the
+//! ring buffer for pause-and-rewind.
 //!
 //! S1 keys handled by [`App::handle_key`]:
-//!   - `q`, `Esc`, `Ctrl-C`         → exit
-//!   - `Up` / `k`, `Down` / `j`     → move row cursor
+//!   - `q`, `Esc`, `Ctrl-C`         → exit (Esc cancels an open prompt first)
+//!   - `Up` / `k`, `Down` / `j`     → move row cursor (sticky-header scroll)
 //!   - `PageUp` / `PageDown`        → jump cursor by page
 //!   - `Home` / `End`               → first / last row
+//!   - `s`                          → set refresh delay (prompt 0.1–60 s)
+//!   - `e`                          → toggle extended columns (app/client/backend)
 //!
-//! Any other key is ignored at this stage.
+//! When a prompt is open, every other key feeds it (digits, `.`, Backspace,
+//! Enter to apply, Esc to cancel).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -41,6 +42,9 @@ pub struct ActivityRow {
     /// Trimmed query text (already truncated by the sampler to keep snapshots
     /// small). The renderer truncates further to the available column width.
     pub query: String,
+    /// Number of granted locks held by this backend (count from `pg_locks`).
+    /// Includes virtualxid / transactionid locks every active backend has.
+    pub locks_held: i64,
 }
 
 /// Server-wide summary drawn in the header bar.
@@ -56,6 +60,18 @@ pub struct ServerSummary {
     pub idle_in_tx: u32,
     pub waiting: u32,
     pub total_backends: u32,
+    pub max_connections: u32,
+    /// Age of the longest-running open transaction (any state). 0 when no
+    /// backend is in a transaction.
+    pub longest_xact_secs: f64,
+    /// Age of the longest-running *active* query (excludes idle backends).
+    /// 0 when no backend is currently running a query.
+    pub longest_active_query_secs: f64,
+    /// Cumulative deadlocks across every database in the cluster (sum of
+    /// `pg_stat_database.deadlocks`).
+    pub deadlocks_total: i64,
+    /// Cumulative temp file count across every database in the cluster.
+    pub temp_files_total: i64,
 }
 
 /// One sample tick of data; what the sampler produces and the renderer reads.
@@ -84,8 +100,40 @@ impl View {
     }
 }
 
+/// Footer prompt state. `s` opens the refresh-delay prompt; later sprints
+/// will reuse this struct for the filter (`/`) and sort (`o`) prompts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptState {
+    pub kind: PromptKind,
+    pub buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Set refresh interval in seconds.
+    Refresh,
+}
+
+impl PromptKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Refresh => "delay (secs)",
+        }
+    }
+}
+
+/// Default refresh interval in seconds when neither the CLI flag nor the
+/// runtime prompt overrides it.
+pub const DEFAULT_REFRESH_SECS: f64 = 1.0;
+
+/// Lower / upper bounds for the refresh prompt. 100 ms keeps the sampler
+/// from monopolising the connection; 60 s avoids the user accidentally
+/// disabling refresh entirely.
+pub const MIN_REFRESH_SECS: f64 = 0.1;
+pub const MAX_REFRESH_SECS: f64 = 60.0;
+
 /// UI state for `/top`. Pure data — no I/O, no side effects.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct App {
     pub view: View,
     pub snapshot: Option<Snapshot>,
@@ -101,6 +149,29 @@ pub struct App {
     pub stale_ticks: u32,
     /// Set by [`App::handle_key`] when the user requests exit.
     pub should_exit: bool,
+    /// Sampler refresh interval in seconds.
+    pub refresh_secs: f64,
+    /// When `true`, the activity table renders `app`, `client`, and
+    /// `backend` columns in addition to the default set. Toggled by `e`.
+    pub extended: bool,
+    /// Footer prompt state. `Some` when the user is typing into a prompt.
+    pub prompt: Option<PromptState>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            view: View::default(),
+            snapshot: None,
+            selected_row: 0,
+            last_error: None,
+            stale_ticks: 0,
+            should_exit: false,
+            refresh_secs: DEFAULT_REFRESH_SECS,
+            extended: false,
+            prompt: None,
+        }
+    }
 }
 
 impl App {
@@ -124,12 +195,10 @@ impl App {
         self.selected_row = self.selected_row.saturating_add(n).min(max);
     }
 
-    /// Jump cursor to the first row.
     pub fn cursor_home(&mut self) {
         self.selected_row = 0;
     }
 
-    /// Jump cursor to the last row.
     pub fn cursor_end(&mut self) {
         self.selected_row = self.row_count().saturating_sub(1);
     }
@@ -151,20 +220,49 @@ impl App {
         self.clamp_cursor();
     }
 
-    /// Note a missed (timed-out) tick.
     pub fn note_stale(&mut self) {
         self.stale_ticks = self.stale_ticks.saturating_add(1);
     }
 
-    /// Note a sampler error. Caller should keep the message short.
     pub fn note_error(&mut self, msg: String) {
         self.last_error = Some(msg);
+    }
+
+    /// Open the refresh-delay prompt seeded with the current value.
+    pub fn open_refresh_prompt(&mut self) {
+        self.prompt = Some(PromptState {
+            kind: PromptKind::Refresh,
+            buffer: format_refresh_seed(self.refresh_secs),
+        });
+    }
+
+    /// Apply the currently open prompt, parsing its buffer and updating the
+    /// corresponding setting. Out-of-range or unparseable input is ignored
+    /// (the prompt closes either way).
+    pub fn apply_prompt(&mut self) {
+        if let Some(prompt) = self.prompt.take() {
+            match prompt.kind {
+                PromptKind::Refresh => {
+                    if let Ok(n) = prompt.buffer.parse::<f64>() {
+                        if (MIN_REFRESH_SECS..=MAX_REFRESH_SECS).contains(&n) {
+                            self.refresh_secs = n;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Process a key event. Returns `true` when the caller should exit the
     /// event loop. The exit signal is also stored in `should_exit` so
     /// renderers/tests can observe it.
     pub fn handle_key(&mut self, key: KeyEvent, page_size: usize) -> bool {
+        // Active prompt swallows almost every key.
+        if self.prompt.is_some() {
+            self.handle_prompt_key(key);
+            return self.should_exit;
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -179,9 +277,41 @@ impl App {
             KeyCode::PageDown => self.cursor_down(page_size.max(1)),
             KeyCode::Home => self.cursor_home(),
             KeyCode::End => self.cursor_end(),
+            KeyCode::Char('s') => self.open_refresh_prompt(),
+            KeyCode::Char('e') => self.extended = !self.extended,
             _ => {}
         }
         self.should_exit
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+            }
+            KeyCode::Enter => self.apply_prompt(),
+            KeyCode::Backspace => {
+                prompt.buffer.pop();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                // Reasonable upper bound on prompt length.
+                if prompt.buffer.len() < 10 {
+                    prompt.buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn format_refresh_seed(secs: f64) -> String {
+    if (secs - secs.round()).abs() < 0.0005 {
+        format!("{secs:.0}")
+    } else {
+        format!("{secs:.2}")
     }
 }
 
@@ -232,6 +362,9 @@ mod tests {
         assert_eq!(app.row_count(), 0);
         assert!(!app.should_exit);
         assert_eq!(app.view, View::Activity);
+        assert!((app.refresh_secs - DEFAULT_REFRESH_SECS).abs() < f64::EPSILON);
+        assert!(!app.extended);
+        assert!(app.prompt.is_none());
     }
 
     #[test]
@@ -248,23 +381,17 @@ mod tests {
         let mut app = App::new();
         app.set_snapshot(snap_with(5));
 
-        // Down 1 from 0
         app.handle_key(key(KeyCode::Down), 10);
         assert_eq!(app.selected_row, 1);
-
-        // Down past the end stays at last row
         for _ in 0..50 {
             app.handle_key(key(KeyCode::Down), 10);
         }
         assert_eq!(app.selected_row, 4);
-
-        // Up past start stays at 0
         for _ in 0..50 {
             app.handle_key(key(KeyCode::Up), 10);
         }
         assert_eq!(app.selected_row, 0);
 
-        // Home / End
         app.handle_key(key(KeyCode::End), 10);
         assert_eq!(app.selected_row, 4);
         app.handle_key(key(KeyCode::Home), 10);
@@ -301,11 +428,9 @@ mod tests {
         app.handle_key(key(KeyCode::End), 10);
         assert_eq!(app.selected_row, 9);
 
-        // Row count shrinks; cursor must clamp to the new last row.
         app.set_snapshot(snap_with(3));
         assert_eq!(app.selected_row, 2);
 
-        // And to 0 if there are no rows at all.
         app.set_snapshot(snap_with(0));
         assert_eq!(app.selected_row, 0);
     }
@@ -340,5 +465,96 @@ mod tests {
     #[test]
     fn view_label_is_user_visible_text() {
         assert_eq!(View::Activity.label(), "Activity");
+    }
+
+    #[test]
+    fn e_toggles_extended_columns() {
+        let mut app = App::new();
+        assert!(!app.extended);
+        app.handle_key(key(KeyCode::Char('e')), 10);
+        assert!(app.extended);
+        app.handle_key(key(KeyCode::Char('e')), 10);
+        assert!(!app.extended);
+    }
+
+    #[test]
+    fn s_opens_refresh_prompt_seeded_with_current_value() {
+        let mut app = App::new();
+        app.refresh_secs = 1.0;
+        app.handle_key(key(KeyCode::Char('s')), 10);
+        let prompt = app.prompt.as_ref().expect("prompt opened");
+        assert_eq!(prompt.kind, PromptKind::Refresh);
+        assert_eq!(prompt.buffer, "1");
+
+        // The fractional seed format keeps two decimals.
+        app.prompt = None;
+        app.refresh_secs = 0.5;
+        app.handle_key(key(KeyCode::Char('s')), 10);
+        assert_eq!(app.prompt.as_ref().unwrap().buffer, "0.50");
+    }
+
+    #[test]
+    fn refresh_prompt_accepts_digits_and_dot() {
+        let mut app = App::new();
+        app.open_refresh_prompt();
+        // Seed is "1"; clear it then type 0.25
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Backspace), 10);
+        }
+        for c in "0.25".chars() {
+            app.handle_key(key(KeyCode::Char(c)), 10);
+        }
+        assert_eq!(app.prompt.as_ref().unwrap().buffer, "0.25");
+
+        // Letters are rejected.
+        app.handle_key(key(KeyCode::Char('x')), 10);
+        assert_eq!(app.prompt.as_ref().unwrap().buffer, "0.25");
+
+        app.handle_key(key(KeyCode::Enter), 10);
+        assert!(app.prompt.is_none());
+        assert!((app.refresh_secs - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn refresh_prompt_clamps_out_of_range_input() {
+        let mut app = App::new();
+        let original = app.refresh_secs;
+        app.open_refresh_prompt();
+        for _ in 0..app.prompt.as_ref().unwrap().buffer.len() {
+            app.handle_key(key(KeyCode::Backspace), 10);
+        }
+        for c in "999".chars() {
+            app.handle_key(key(KeyCode::Char(c)), 10);
+        }
+        app.handle_key(key(KeyCode::Enter), 10);
+        // 999 > MAX → ignored.
+        assert!((app.refresh_secs - original).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn esc_cancels_prompt_without_changing_setting() {
+        let mut app = App::new();
+        let original = app.refresh_secs;
+        app.open_refresh_prompt();
+        for c in "0.5".chars() {
+            app.handle_key(key(KeyCode::Char(c)), 10);
+        }
+        // Esc closes the prompt without applying.
+        assert!(!app.handle_key(key(KeyCode::Esc), 10));
+        assert!(app.prompt.is_none());
+        assert!((app.refresh_secs - original).abs() < f64::EPSILON);
+        // First Esc closed the prompt; second Esc exits.
+        assert!(app.handle_key(key(KeyCode::Esc), 10));
+    }
+
+    #[test]
+    fn exit_keys_swallowed_while_prompt_open() {
+        // q while the prompt is open is treated as a typed character (rejected
+        // because it is not a digit or dot), not as an exit signal.
+        let mut app = App::new();
+        app.open_refresh_prompt();
+        let exit = app.handle_key(key(KeyCode::Char('q')), 10);
+        assert!(!exit);
+        assert!(app.prompt.is_some());
     }
 }

@@ -7,12 +7,14 @@
 //! need columns gated on PG ≥ 16 should branch at construction time using
 //! the server's `server_version_num` once the sampler exposes it.
 
-/// One-shot server summary used in the header bar.
+/// Server summary used in the header bar.
 ///
-/// Returns a single row with: db name, current user, server version short
-/// string, uptime in seconds, recovery flag, and aggregate session counts
-/// from `pg_stat_activity`. Excludes the rpg backend itself so the active
-/// count is not inflated by the monitor.
+/// Returns a single row mixing per-cluster facts (uptime, recovery,
+/// `max_connections`), per-database aggregates (`deadlocks`, `temp_files` —
+/// summed across every database the cluster knows about), and per-session
+/// aggregates from `pg_stat_activity` (active / idle-in-tx / wait counts,
+/// longest active transaction, longest active query). Excludes the rpg
+/// monitor backend itself so the active count is not inflated.
 pub const SUMMARY_SQL: &str = r"
     select
         current_database()                                          as db_name,
@@ -31,44 +33,68 @@ pub const SUMMARY_SQL: &str = r"
         coalesce(sum(case
             when wait_event is not null and state = 'active' then 1 else 0 end), 0)::int
                                                                     as waiting,
-        count(*)::int                                               as total_backends
+        count(*)::int                                               as total_backends,
+        current_setting('max_connections')::int                     as max_connections,
+        coalesce(
+            extract(epoch from (now() - min(xact_start)))::float8,
+            0::float8
+        )                                                           as longest_xact_secs,
+        coalesce(
+            extract(epoch from (
+                now() - min(query_start) filter (where state = 'active')
+            ))::float8,
+            0::float8
+        )                                                           as longest_active_query_secs,
+        (select coalesce(sum(deadlocks), 0)::int8 from pg_stat_database)
+                                                                    as deadlocks_total,
+        (select coalesce(sum(temp_files), 0)::int8 from pg_stat_database)
+                                                                    as temp_files_total
     from pg_stat_activity
     where pid <> pg_backend_pid()
 ";
 
-/// Activity view body — one row per non-rpg backend, ordered with active
-/// backends first and the longest-running queries on top.
+/// Activity view body — one row per non-rpg backend, with a count of
+/// granted locks held per pid (left-joined from `pg_locks`). Ordered with
+/// active backends first and longest-running queries on top.
 ///
-/// The query is intentionally portable across PG14–PG18: every column used
-/// here exists in PG14's `pg_stat_activity`. Columns available in PG14 but
-/// excluded to keep S1 minimal: `query_id`, `leader_pid`. They will be
-/// added when the drill-down overlay (S4) needs them.
+/// Portable across PG14–PG18: every column used here exists in PG14's
+/// `pg_stat_activity`. Columns available in PG14 but excluded to keep S1
+/// minimal: `query_id`, `leader_pid`. They will be added when the
+/// drill-down overlay (S4) needs them.
 pub const ACTIVITY_SQL: &str = "
+    with locks as (
+        select pid, count(*)::bigint as n
+        from pg_locks
+        where granted
+        group by pid
+    )
     select
-        pid,
-        coalesce(usename, '')                                       as usename,
-        coalesce(datname, '')                                       as datname,
-        coalesce(application_name, '')                              as application_name,
-        coalesce(client_addr::text, '')                             as client_addr,
-        coalesce(backend_type, '')                                  as backend_type,
-        coalesce(state, '')                                         as state,
-        coalesce(wait_event_type, '')                               as wait_event_type,
-        coalesce(wait_event, '')                                    as wait_event,
+        a.pid,
+        coalesce(a.usename, '')                                     as usename,
+        coalesce(a.datname, '')                                     as datname,
+        coalesce(a.application_name, '')                            as application_name,
+        coalesce(a.client_addr::text, '')                           as client_addr,
+        coalesce(a.backend_type, '')                                as backend_type,
+        coalesce(a.state, '')                                       as state,
+        coalesce(a.wait_event_type, '')                             as wait_event_type,
+        coalesce(a.wait_event, '')                                  as wait_event,
         case
-            when query_start is null then null
-            else extract(epoch from (now() - query_start))::float8
+            when a.query_start is null then null
+            else extract(epoch from (now() - a.query_start))::float8
         end                                                         as qtime_secs,
         case
-            when xact_start is null then null
-            else extract(epoch from (now() - xact_start))::float8
+            when a.xact_start is null then null
+            else extract(epoch from (now() - a.xact_start))::float8
         end                                                         as xtime_secs,
-        coalesce(left(query, 500), '')                              as query
-    from pg_stat_activity
-    where pid <> pg_backend_pid()
+        coalesce(left(a.query, 500), '')                            as query,
+        coalesce(l.n, 0)::bigint                                    as locks_held
+    from pg_stat_activity as a
+    left join locks as l using (pid)
+    where a.pid <> pg_backend_pid()
     order by
-        case state when 'active' then 0 else 1 end,
+        case a.state when 'active' then 0 else 1 end,
         qtime_secs desc nulls last,
-        pid
+        a.pid
 ";
 
 #[cfg(test)]
@@ -77,7 +103,6 @@ mod tests {
 
     #[test]
     fn summary_sql_mentions_required_columns() {
-        // Spot-check for the columns the renderer will read by index.
         for col in [
             "db_name",
             "usename",
@@ -88,12 +113,25 @@ mod tests {
             "idle_in_tx",
             "waiting",
             "total_backends",
+            "max_connections",
+            "longest_xact_secs",
+            "longest_active_query_secs",
+            "deadlocks_total",
+            "temp_files_total",
         ] {
             assert!(
                 SUMMARY_SQL.contains(col),
                 "summary SQL is missing column {col}"
             );
         }
+    }
+
+    #[test]
+    fn summary_sql_excludes_self_backend() {
+        assert!(
+            SUMMARY_SQL.contains("pid <> pg_backend_pid()"),
+            "summary SQL must exclude the rpg monitor backend itself",
+        );
     }
 
     #[test]
@@ -106,22 +144,37 @@ mod tests {
 
     #[test]
     fn activity_sql_orders_active_first_then_qtime_desc() {
-        assert!(ACTIVITY_SQL.contains("case state when 'active' then 0 else 1 end"));
+        assert!(ACTIVITY_SQL.contains("case a.state when 'active' then 0 else 1 end"));
         assert!(ACTIVITY_SQL.contains("qtime_secs desc nulls last"));
     }
 
-    /// Regression test: tokio-postgres cannot deserialize Postgres `numeric`
-    /// directly into Rust `f64`; we must cast `extract(epoch from …)` to
-    /// `float8` explicitly. Surfaced in S1 manual testing as
-    /// "error deserializing column 9".
+    #[test]
+    fn activity_sql_includes_locks_held_column() {
+        assert!(
+            ACTIVITY_SQL.contains("as locks_held"),
+            "activity SQL must include the locks_held column",
+        );
+        assert!(
+            ACTIVITY_SQL.contains("from pg_locks"),
+            "locks_held must come from pg_locks",
+        );
+        assert!(
+            ACTIVITY_SQL.contains("where granted"),
+            "only granted locks should be counted",
+        );
+    }
+
+    /// Regression test for the deserialization bug surfaced during S1
+    /// manual testing: tokio-postgres cannot decode Postgres `numeric`
+    /// directly into Rust `f64`; the cast must be `::float8`.
     #[test]
     fn elapsed_time_columns_cast_to_float8() {
         assert!(
-            ACTIVITY_SQL.contains("(now() - query_start))::float8"),
+            ACTIVITY_SQL.contains("(now() - a.query_start))::float8"),
             "qtime_secs must be cast to float8"
         );
         assert!(
-            ACTIVITY_SQL.contains("(now() - xact_start))::float8"),
+            ACTIVITY_SQL.contains("(now() - a.xact_start))::float8"),
             "xtime_secs must be cast to float8"
         );
     }

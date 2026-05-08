@@ -71,6 +71,12 @@ async fn query_summary(client: &Client, timeout_ms: u64) -> anyhow::Result<Optio
         waiting: row.get::<_, i32>(7).max(0) as u32,
         #[allow(clippy::cast_sign_loss)]
         total_backends: row.get::<_, i32>(8).max(0) as u32,
+        #[allow(clippy::cast_sign_loss)]
+        max_connections: row.get::<_, i32>(9).max(0) as u32,
+        longest_xact_secs: row.try_get::<_, Option<f64>>(10)?.unwrap_or(0.0).max(0.0),
+        longest_active_query_secs: row.try_get::<_, Option<f64>>(11)?.unwrap_or(0.0).max(0.0),
+        deadlocks_total: row.try_get::<_, Option<i64>>(12)?.unwrap_or(0),
+        temp_files_total: row.try_get::<_, Option<i64>>(13)?.unwrap_or(0),
     }))
 }
 
@@ -106,6 +112,7 @@ async fn query_activity(
             qtime_secs: r.try_get::<_, Option<f64>>(9)?,
             xtime_secs: r.try_get::<_, Option<f64>>(10)?,
             query: r.get::<_, String>(11),
+            locks_held: r.try_get::<_, Option<i64>>(12)?.unwrap_or(0),
         });
     }
     Ok(Some(out))

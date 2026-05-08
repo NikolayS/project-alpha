@@ -42,10 +42,6 @@ use theme::Theme;
 
 use crate::repl::ReplSettings;
 
-/// Default refresh interval. Configurable via `[top] refresh` in `.rpg.toml`
-/// once that surface lands; for S1 it is hard-coded to 1 s.
-const DEFAULT_REFRESH: Duration = Duration::from_secs(1);
-
 /// Per-query observer-effect timeout. Mirrors `/ash`'s default sample
 /// timeout.
 const SAMPLE_TIMEOUT_MS: u64 = 5_000;
@@ -79,25 +75,40 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Parsed `/top` invocation flags. S1 only ships `--once`; later sprints
-/// add `--view`, `--filter`, `--refresh`, etc. (see `.samo/spec/top/SPEC.md`).
+/// Parsed `/top` invocation flags.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TopArgs {
     /// Headless mode: take one snapshot, dump a plain-text rendering to
     /// stdout, and exit. Skips the alt-screen + raw-mode setup so it is
     /// safe to run from `rpg --command "/top --once"` and from CI.
     pub once: bool,
+    /// Sampler refresh interval in seconds. `None` keeps
+    /// [`state::DEFAULT_REFRESH_SECS`]. CLI: `--refresh <n>` or `-s <n>`,
+    /// matching `pg_top` / `pgcenter`.
+    pub refresh_secs: Option<f64>,
 }
 
 impl TopArgs {
     /// Parse the argument string passed after `/top` in the REPL (or via
-    /// `rpg --command`). Unknown tokens are warned about on stderr in the
-    /// caller; here we just succeed for the recognised ones.
+    /// `rpg --command`). Unknown tokens are silently ignored.
     pub fn parse(args: &str) -> Self {
+        use state::{MAX_REFRESH_SECS, MIN_REFRESH_SECS};
+
         let mut out = Self::default();
-        for tok in args.split_whitespace() {
-            if tok == "--once" {
-                out.once = true;
+        let mut iter = args.split_whitespace().peekable();
+        while let Some(tok) = iter.next() {
+            match tok {
+                "--once" => out.once = true,
+                "--refresh" | "-s" => {
+                    if let Some(val) = iter.next() {
+                        if let Ok(n) = val.parse::<f64>() {
+                            if (MIN_REFRESH_SECS..=MAX_REFRESH_SECS).contains(&n) {
+                                out.refresh_secs = Some(n);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         out
@@ -121,6 +132,9 @@ pub async fn run_top(
     }
 
     let mut app = App::new();
+    if let Some(secs) = args.refresh_secs {
+        app.refresh_secs = secs;
+    }
     let theme = Theme::default_theme();
 
     let _guard = TerminalGuard::new()?;
@@ -139,7 +153,9 @@ pub async fn run_top(
         terminal.draw(|f| renderer::draw(f, &app, &theme))?;
 
         // 3. Drain key/mouse events until the next refresh deadline.
-        let deadline = Instant::now() + DEFAULT_REFRESH;
+        // The deadline is recomputed each tick so an interactive change to
+        // `app.refresh_secs` (via the `s` prompt) takes effect immediately.
+        let deadline = Instant::now() + Duration::from_secs_f64(app.refresh_secs);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -230,5 +246,46 @@ mod tests {
     fn parse_unknown_flags_are_ignored() {
         let a = TopArgs::parse("--banana --once --carrot");
         assert!(a.once);
+    }
+
+    #[test]
+    fn parse_refresh_flag_accepts_values_in_range() {
+        for (input, expected) in [
+            ("--refresh 0.5", Some(0.5)),
+            ("-s 2", Some(2.0)),
+            ("--refresh 0.1", Some(0.1)),
+            ("--refresh 60", Some(60.0)),
+        ] {
+            let a = TopArgs::parse(input);
+            assert!(
+                matches!(a.refresh_secs, x if (x.unwrap_or(-1.0) - expected.unwrap()).abs() < f64::EPSILON),
+                "{input} → {:?}",
+                a.refresh_secs
+            );
+        }
+    }
+
+    #[test]
+    fn parse_refresh_flag_rejects_out_of_range() {
+        for input in [
+            "--refresh 0.05",
+            "--refresh 999",
+            "--refresh xx",
+            "--refresh -1",
+        ] {
+            let a = TopArgs::parse(input);
+            assert!(
+                a.refresh_secs.is_none(),
+                "{input} accepted: {:?}",
+                a.refresh_secs
+            );
+        }
+    }
+
+    #[test]
+    fn parse_refresh_combines_with_once() {
+        let a = TopArgs::parse("--once --refresh 0.5");
+        assert!(a.once);
+        assert_eq!(a.refresh_secs, Some(0.5));
     }
 }

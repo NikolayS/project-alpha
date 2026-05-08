@@ -1,10 +1,11 @@
 Output demos/top-demo.gif
-Set FontSize 15
+Set FontSize 14
 Set Width 1400
 Set Height 800
 Set Theme "Dracula"
 Set Shell "zsh"
-Set TypingSpeed 30ms
+Set TypingSpeed 40ms
+Set PlaybackSpeed 1.0
 
 # --- Hidden setup: PATH + connection env + start workload + clear ---
 Hide
@@ -16,67 +17,86 @@ Enter
 Sleep 200ms
 Type "bash /Users/nik/github/rpg/demos/top-workload.sh &"
 Enter
-Sleep 3s
+Sleep 4s
 Type "clear"
 Enter
 Sleep 500ms
 Show
 
-# --- Connect: pause so the viewer can read the typed command ---
+# --- Connect ---
 Type "rpg"
 Sleep 1500ms
 Enter
 Sleep 3s
 
-# --- Launch /top: pause before Enter, then watch the live TUI ---
-# Visible smart features appearing here (no overlay text in vhs):
-#   • header connection LED ●  (green = fresh sample, yellow = stale)
-#   • "@ HH:MM:SS UTC" clock format (not a raw unix epoch)
-#   • per-state coloring (idle-in-tx = yellow, active = bright green)
-#   • per-wait coloring (Lock = red, IO = blue, LWLock = light yellow)
-#   • qtime warn/crit thresholds (>1 s yellow, >30 s red)
-#   • app/client/backend columns auto-shown ≥120 cols (responsive layout)
+# --- Launch /top with default 1 s refresh ---
+# Visible features (all default):
+#   • two-line header: db/user/pg/recovery/uptime/clock UTC
+#                      + active/idle-in-tx/wait/total/max + longest-tx,
+#                        longest-q + cumulative deadlocks + temp_files + ●
+#   • activity table — pid, user, db, state, wait, qtime, xtime, locks, query
+#   • wait coloring follows the pg_ash palette (CPU green, IO vivid blue,
+#     Lock red, LWLock pink, IPC cyan, Client yellow, Timeout orange,
+#     IdleTx light yellow, …) and uses ':' as the Type:Event delimiter
+#   • qtime warn (>1 s yellow) / crit (>30 s red)
+#   • sticky table header — rows scroll, header stays
 Type "/top"
 Sleep 1500ms
 Enter
 Sleep 6s
 
-# --- Cursor navigation: sticks across row-count changes between ticks ---
+# --- Cursor navigation: scroll past the visible window so the sticky
+# --- header is visible while body content scrolls underneath. ---
 Down
-Sleep 700ms
+Sleep 500ms
 Down
-Sleep 700ms
+Sleep 500ms
 Down
-Sleep 700ms
+Sleep 500ms
 Down
-Sleep 700ms
+Sleep 500ms
 Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 800ms
+PageDown
+Sleep 1500ms
+PageDown
+Sleep 2s
+PageUp
 Sleep 1500ms
 
-# --- Pause to let the viewer watch counts/waits change live ---
+# --- Toggle extended columns: app, client, backend appear ---
+Type "e"
 Sleep 4s
 
-# --- Move back up; cursor clamps even if rows shrink mid-tick ---
-Up
-Sleep 500ms
-Up
-Sleep 500ms
-Up
-Sleep 500ms
-Up
-Sleep 500ms
-Up
-Sleep 1500ms
-
-# --- One more live refresh to show stable behaviour ---
-Sleep 3s
-
-# --- Quit /top with q (single-key, no Enter needed in TUI) ---
-Type "q"
+# --- Collapse back to default columns ---
+Type "e"
 Sleep 2s
 
-# --- Headless `--once` mode: scriptable / CI snapshot ---
-# Same renderer as the TUI, written as plain text to stdout.
+# --- Set refresh delay to 0.5 s via the interactive prompt ---
+Type "s"
+Sleep 1500ms
+Backspace
+Backspace
+Backspace
+Backspace
+Type "0.5"
+Sleep 1200ms
+Enter
+Sleep 5s
+
+# --- Quit /top with q ---
+Type "q"
+Sleep 1500ms
+
+# --- Headless `--once` mode for scripting / CI snapshots ---
 Type "/top --once"
 Sleep 1500ms
 Enter

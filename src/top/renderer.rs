@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Frame;
 
-use super::state::{App, Snapshot, View};
+use super::state::{App, PromptKind, PromptState, Snapshot, View};
 use super::theme::Theme;
 use super::views::activity::{self, scrub_terminal_unsafe};
 
@@ -28,9 +28,9 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
+            Constraint::Length(4), // header (2 inner rows + 2 borders)
             Constraint::Length(1), // tabs
-            Constraint::Min(3),    // body
+            Constraint::Min(3),    // body (sticky table header)
             Constraint::Length(1), // footer
         ])
         .split(area);
@@ -53,20 +53,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(inner);
-
     let snap = app.snapshot.as_ref();
-    let summary_line = build_summary_line(snap, theme);
-    let counts_line = build_counts_line(snap, app, theme);
-
-    frame.render_widget(Paragraph::new(summary_line), columns[0]);
-    frame.render_widget(
-        Paragraph::new(counts_line).alignment(ratatui::layout::Alignment::Right),
-        columns[1],
-    );
+    let lines = vec![
+        build_summary_line(snap, theme),
+        build_counts_line(snap, app, theme),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn build_summary_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> {
@@ -113,7 +105,18 @@ fn build_counts_line<'a>(snap: Option<&'a Snapshot>, app: &'a App, theme: &'a Th
             Span::styled("  wait ", theme.muted),
             Span::raw(s.server.waiting.to_string()),
             Span::styled("  total ", theme.muted),
-            Span::raw(s.server.total_backends.to_string()),
+            Span::raw(format!(
+                "{}/{}",
+                s.server.total_backends, s.server.max_connections
+            )),
+            Span::styled("  longest-tx ", theme.muted),
+            Span::raw(format_secs_or_dash(s.server.longest_xact_secs)),
+            Span::styled("  longest-q ", theme.muted),
+            Span::raw(format_secs_or_dash(s.server.longest_active_query_secs)),
+            Span::styled("  deadlocks ", theme.muted),
+            Span::raw(s.server.deadlocks_total.to_string()),
+            Span::styled("  temp-files ", theme.muted),
+            Span::raw(s.server.temp_files_total.to_string()),
         ]);
         if app.stale_ticks > 0 {
             spans.push(Span::styled(
@@ -128,6 +131,25 @@ fn build_counts_line<'a>(snap: Option<&'a Snapshot>, app: &'a App, theme: &'a Th
         ));
     }
     Line::from(spans)
+}
+
+/// Format a non-negative second count as a compact human string, or `"-"`
+/// when zero (which we treat as "no transaction / no active query").
+fn format_secs_or_dash(secs: f64) -> String {
+    if secs <= 0.0 {
+        return "-".to_owned();
+    }
+    if secs < 1.0 {
+        format!("{:.0}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else if secs < 3600.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else if secs < 86_400.0 {
+        format!("{:.0}h", secs / 3600.0)
+    } else {
+        format!("{:.0}d", secs / 86_400.0)
+    }
 }
 
 fn format_uptime(secs: i64) -> String {
@@ -201,24 +223,44 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 // ---------------------------------------------------------------------------
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let line = if let Some(err) = app.last_error.as_deref() {
+    let line = if let Some(prompt) = app.prompt.as_ref() {
+        build_prompt_line(prompt, theme)
+    } else if let Some(err) = app.last_error.as_deref() {
         Line::from(vec![
             Span::styled(" error ", Style::default().fg(ratatui::style::Color::Red)),
             Span::raw(truncate_err(err, area.width.saturating_sub(8) as usize)),
         ])
     } else {
-        Line::from(vec![
-            Span::styled(" q ", theme.title),
-            Span::styled("quit  ", theme.footer),
-            Span::styled("↑↓ ", theme.title),
-            Span::styled("move  ", theme.footer),
-            Span::styled("Home/End ", theme.title),
-            Span::styled("first/last  ", theme.footer),
-            Span::styled("PgUp/PgDn ", theme.title),
-            Span::styled("page  ", theme.footer),
-        ])
+        build_default_footer(theme)
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn build_default_footer(theme: &Theme) -> Line<'_> {
+    Line::from(vec![
+        Span::styled(" q ", theme.title),
+        Span::styled("quit  ", theme.footer),
+        Span::styled("↑↓ ", theme.title),
+        Span::styled("move  ", theme.footer),
+        Span::styled("e ", theme.title),
+        Span::styled("extended  ", theme.footer),
+        Span::styled("s ", theme.title),
+        Span::styled("set delay  ", theme.footer),
+        Span::styled("PgUp/PgDn ", theme.title),
+        Span::styled("page  ", theme.footer),
+    ])
+}
+
+fn build_prompt_line<'a>(prompt: &'a PromptState, theme: &'a Theme) -> Line<'a> {
+    let label = match prompt.kind {
+        PromptKind::Refresh => prompt.kind.label(),
+    };
+    Line::from(vec![
+        Span::styled(format!(" {label}: "), theme.title),
+        Span::raw(prompt.buffer.as_str()),
+        Span::styled("█", theme.title),
+        Span::styled("   [Enter to apply, Esc to cancel]", theme.muted),
+    ])
 }
 
 fn truncate_err(s: &str, max: usize) -> String {
@@ -268,6 +310,11 @@ mod tests {
                 idle_in_tx: 3,
                 waiting: 2,
                 total_backends: 22,
+                max_connections: 100,
+                longest_xact_secs: 125.0,
+                longest_active_query_secs: 42.0,
+                deadlocks_total: 0,
+                temp_files_total: 5,
             },
             rows: vec![
                 ActivityRow {
@@ -283,6 +330,7 @@ mod tests {
                     qtime_secs: Some(42.0),
                     xtime_secs: Some(42.0),
                     query: "update accounts set balance = balance + 1 where id = 5".into(),
+                    locks_held: 4,
                 },
                 ActivityRow {
                     pid: 12_346,
@@ -297,6 +345,7 @@ mod tests {
                     qtime_secs: Some(2.3),
                     xtime_secs: Some(1020.0),
                     query: "select count(*) from events where ts > now() - interval '1 day'".into(),
+                    locks_held: 2,
                 },
                 ActivityRow {
                     pid: 12_350,
@@ -311,6 +360,7 @@ mod tests {
                     qtime_secs: Some(5.0),
                     xtime_secs: Some(125.0),
                     query: "begin".into(),
+                    locks_held: 7,
                 },
             ],
         }
@@ -384,16 +434,101 @@ mod tests {
     }
 
     #[test]
-    fn narrow_layout_omits_app_and_client_columns() {
+    fn default_layout_omits_app_and_client_columns() {
         let mut app = App::new();
         app.set_snapshot(fixture_snapshot());
-        let buf = render_into(80, 30, &app);
+        // Even on a wide terminal, app/client/backend are not in the default
+        // column set — they require `e` to opt into extended mode.
+        let buf = render_into(140, 30, &app);
         let dump = buffer_to_string(&buf);
-        assert!(dump.contains("12345"), "narrow layout dropped pid");
+        assert!(dump.contains("12345"), "default layout dropped pid");
         assert!(
             !dump.contains("10.0.0.5"),
-            "narrow layout should drop client column"
+            "default layout must not show the client column: {dump}"
         );
+        assert!(
+            !dump.contains("etl-runner"),
+            "default layout must not show the application_name column: {dump}"
+        );
+    }
+
+    #[test]
+    fn extended_mode_adds_app_client_backend_columns() {
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.extended = true;
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            dump.contains("10.0.0.5"),
+            "extended mode must show client_addr: {dump}"
+        );
+        assert!(
+            dump.contains("etl-runner"),
+            "extended mode must show application_name: {dump}"
+        );
+        // The Activity title gains the [extended] indicator.
+        assert!(
+            dump.contains("[extended]"),
+            "extended-mode badge missing: {dump}"
+        );
+    }
+
+    #[test]
+    fn header_renders_enriched_postgres_stats() {
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        let buf = render_into(160, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            dump.contains("total 22/100"),
+            "total/max_connections missing: {dump}"
+        );
+        assert!(dump.contains("longest-tx"), "longest-tx missing: {dump}");
+        assert!(dump.contains("longest-q"), "longest-q missing: {dump}");
+        assert!(
+            dump.contains("deadlocks 0"),
+            "deadlocks counter missing: {dump}"
+        );
+        assert!(
+            dump.contains("temp-files 5"),
+            "temp-files counter missing: {dump}"
+        );
+    }
+
+    #[test]
+    fn footer_shows_refresh_prompt_when_open() {
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.open_refresh_prompt();
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            dump.contains("delay (secs)"),
+            "prompt label missing: {dump}"
+        );
+        assert!(
+            dump.contains("[Enter to apply, Esc to cancel]"),
+            "prompt hint missing: {dump}"
+        );
+        // Default footer hints must be hidden while the prompt is open.
+        assert!(
+            !dump.contains(" quit  "),
+            "default footer must be replaced by the prompt: {dump}"
+        );
+    }
+
+    #[test]
+    fn locks_column_shows_dash_for_zero_and_number_otherwise() {
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        // Header row contains the column label.
+        assert!(dump.contains("locks"), "locks header missing: {dump}");
+        // pid 12345 has 4 locks, pid 12350 has 7.
+        assert!(dump.contains('4'), "expected 4-locks count visible");
+        assert!(dump.contains('7'), "expected 7-locks count visible");
     }
 
     /// End-to-end safety: a malicious `pg_stat_activity` row with an ANSI
