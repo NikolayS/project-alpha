@@ -76,16 +76,23 @@ impl Drop for TerminalGuard {
 }
 
 /// Parsed `/top` invocation flags.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct TopArgs {
     /// Headless mode: take one snapshot, dump a plain-text rendering to
     /// stdout, and exit. Skips the alt-screen + raw-mode setup so it is
     /// safe to run from `rpg --command "/top --once"` and from CI.
     pub once: bool,
+    /// Continuous batch logging: print a timestamped snapshot every
+    /// `refresh_secs` until interrupted. Designed for `tmux pipe-pane` /
+    /// shell redirection. Skips alt-screen + raw-mode entirely.
+    pub batch: bool,
     /// Sampler refresh interval in seconds. `None` keeps
     /// [`state::DEFAULT_REFRESH_SECS`]. CLI: `--refresh <n>` or `-s <n>`,
     /// matching `pg_top` / `pgcenter`.
     pub refresh_secs: Option<f64>,
+    /// Strftime-style format used for the timestamp prefix in `--batch`
+    /// mode. `None` uses [`state::DEFAULT_TS_FORMAT`] (ISO 8601 UTC).
+    pub ts_format: Option<String>,
 }
 
 impl TopArgs {
@@ -99,6 +106,7 @@ impl TopArgs {
         while let Some(tok) = iter.next() {
             match tok {
                 "--once" => out.once = true,
+                "--batch" | "-b" => out.batch = true,
                 "--refresh" | "-s" => {
                     if let Some(val) = iter.next() {
                         if let Ok(n) = val.parse::<f64>() {
@@ -106,6 +114,11 @@ impl TopArgs {
                                 out.refresh_secs = Some(n);
                             }
                         }
+                    }
+                }
+                "--ts-format" => {
+                    if let Some(val) = iter.next() {
+                        out.ts_format = Some(val.to_owned());
                     }
                 }
                 _ => {}
@@ -126,9 +139,15 @@ pub async fn run_top(
     if args.once {
         return run_once(client).await;
     }
+    if args.batch {
+        return run_batch(client, &args).await;
+    }
 
     if !io::stdout().is_terminal() {
-        anyhow::bail!("/top requires an interactive terminal (use `--once` for a snapshot)");
+        anyhow::bail!(
+            "/top requires an interactive terminal (use `--once` for a snapshot, \
+             `--batch` for continuous logging)"
+        );
     }
 
     let mut app = App::new();
@@ -192,30 +211,84 @@ fn page_size<B: ratatui::backend::Backend>(terminal: &Terminal<B>) -> usize {
     body.max(1) as usize
 }
 
+/// Off-screen buffer dimensions used by `--once` and `--batch`. Wide
+/// enough to render the default-mode columns + a trimmed query string.
+const HEADLESS_WIDTH: u16 = 130;
+const HEADLESS_HEIGHT: u16 = 30;
+
 /// Headless `--once` mode: take one snapshot, render into a fixed-size
 /// off-screen buffer, write the cell contents to stdout as plain text, and
 /// exit. Used for scripting, CI smoke tests, and PR evidence capture.
 async fn run_once(client: &Client) -> anyhow::Result<()> {
-    use ratatui::backend::TestBackend;
-
-    const ONCE_WIDTH: u16 = 130;
-    const ONCE_HEIGHT: u16 = 30;
-
     let mut app = App::new();
-    let theme = Theme::for_once();
+    sample_into_app(client, &mut app).await;
+    write_text_frame(&app, io::stdout().lock())?;
+    Ok(())
+}
 
+/// Continuous `--batch` mode: print a timestamped snapshot every
+/// `refresh_secs` to stdout until SIGINT. Designed for tmux `pipe-pane`,
+/// shell redirection (`> top.log`), and other long-running log capture
+/// workflows. Skips alt-screen + raw-mode entirely so the output is plain
+/// text. Each snapshot is preceded by a separator line containing the
+/// strftime-formatted timestamp, e.g.
+///
+/// ```text
+/// ===== 2026-05-08T12:13:14Z =====
+/// ┌ rpg /top ────────…
+/// …
+/// ```
+async fn run_batch(client: &Client, args: &TopArgs) -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    use state::{format_strftime, DEFAULT_REFRESH_SECS, DEFAULT_TS_FORMAT};
+
+    let interval = Duration::from_secs_f64(args.refresh_secs.unwrap_or(DEFAULT_REFRESH_SECS));
+    let fmt = args
+        .ts_format
+        .as_deref()
+        .unwrap_or(DEFAULT_TS_FORMAT)
+        .to_owned();
+
+    let mut interrupt = std::pin::pin!(tokio::signal::ctrl_c());
+
+    loop {
+        let mut app = App::new();
+        sample_into_app(client, &mut app).await;
+        let ts_secs = app.snapshot.as_ref().map_or(0, |s| s.ts);
+        let ts = format_strftime(&fmt, ts_secs);
+        let mut out = io::stdout().lock();
+        writeln!(out, "===== {ts} =====")?;
+        write_text_frame(&app, &mut out)?;
+        writeln!(out)?;
+        out.flush()?;
+        drop(out);
+
+        tokio::select! {
+            biased;
+            _ = &mut interrupt => break,
+            () = tokio::time::sleep(interval) => {}
+        }
+    }
+    Ok(())
+}
+
+async fn sample_into_app(client: &Client, app: &mut App) {
     match sampler::tick(client, SAMPLE_TIMEOUT_MS).await {
         Ok(TickResult::Ok(snap)) => app.set_snapshot(*snap),
         Ok(TickResult::Missed) => app.note_stale(),
         Err(e) => app.note_error(format!("{e}")),
     }
+}
 
-    let backend = TestBackend::new(ONCE_WIDTH, ONCE_HEIGHT);
+fn write_text_frame<W: Write>(app: &App, mut out: W) -> anyhow::Result<()> {
+    use ratatui::backend::TestBackend;
+
+    let theme = Theme::for_once();
+    let backend = TestBackend::new(HEADLESS_WIDTH, HEADLESS_HEIGHT);
     let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|f| renderer::draw(f, &app, &theme))?;
-
+    terminal.draw(|f| renderer::draw(f, app, &theme))?;
     let buf = terminal.backend().buffer();
-    let mut out = io::stdout().lock();
     for y in 0..buf.area.height {
         for x in 0..buf.area.width {
             out.write_all(buf[(x, y)].symbol().as_bytes())?;
@@ -287,5 +360,26 @@ mod tests {
         let a = TopArgs::parse("--once --refresh 0.5");
         assert!(a.once);
         assert_eq!(a.refresh_secs, Some(0.5));
+    }
+
+    #[test]
+    fn parse_batch_flag_sets_batch() {
+        assert!(TopArgs::parse("--batch").batch);
+        assert!(TopArgs::parse("-b").batch);
+    }
+
+    #[test]
+    fn parse_ts_format_round_trip() {
+        let a = TopArgs::parse("--batch --ts-format %Y-%m-%dT%H:%M:%SZ");
+        assert!(a.batch);
+        assert_eq!(a.ts_format.as_deref(), Some("%Y-%m-%dT%H:%M:%SZ"));
+    }
+
+    #[test]
+    fn parse_batch_with_refresh_and_ts_format() {
+        let a = TopArgs::parse("--batch --refresh 5 --ts-format %F-%T");
+        assert!(a.batch);
+        assert_eq!(a.refresh_secs, Some(5.0));
+        assert_eq!(a.ts_format.as_deref(), Some("%F-%T"));
     }
 }

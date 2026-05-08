@@ -46,31 +46,41 @@ Enter
 Sleep 6s
 
 # --- Cursor navigation: scroll past the visible window so the sticky
-# --- header is visible while body content scrolls underneath. ---
+# --- header is visible while body content scrolls underneath. The corner
+# --- key overlay (⌨) labels each press as it happens. ---
 Down
-Sleep 500ms
+Sleep 600ms
 Down
-Sleep 500ms
+Sleep 600ms
 Down
-Sleep 500ms
+Sleep 600ms
 Down
-Sleep 500ms
+Sleep 600ms
 Down
-Sleep 500ms
-Down
-Sleep 500ms
-Down
-Sleep 500ms
-Down
-Sleep 500ms
+Sleep 600ms
 Down
 Sleep 800ms
 PageDown
-Sleep 1500ms
+Sleep 1800ms
 PageDown
 Sleep 2s
 PageUp
-Sleep 1500ms
+Sleep 1800ms
+
+# --- Cycle sort columns with > / < and reverse with r. The active
+# --- column header carries ▼ (desc) / ▲ (asc). Arrow follows each press. ---
+Type ">"
+Sleep 2500ms
+Type ">"
+Sleep 2500ms
+Type ">"
+Sleep 2500ms
+Type "r"
+Sleep 2500ms
+Type "<"
+Sleep 2500ms
+Type "<"
+Sleep 2500ms
 
 # --- Toggle extended columns: app, client, backend appear ---
 Type "e"

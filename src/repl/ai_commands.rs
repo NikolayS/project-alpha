@@ -537,9 +537,11 @@ pub(super) async fn dispatch_ai_command(
             use std::io::IsTerminal;
             let raw_args = input.strip_prefix("/top").map_or("", str::trim);
             let top_args = crate::top::TopArgs::parse(raw_args);
-            if !top_args.once && !std::io::stdout().is_terminal() {
+            let headless = top_args.once || top_args.batch;
+            if !headless && !std::io::stdout().is_terminal() {
                 rpg_eprintln!(
-                    "/top requires an interactive terminal (use `--once` for a snapshot)"
+                    "/top requires an interactive terminal (use `--once` for a snapshot, \
+                     `--batch` for continuous logging)"
                 );
                 return None;
             }

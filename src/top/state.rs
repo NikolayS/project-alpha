@@ -15,6 +15,8 @@
 //! When a prompt is open, every other key feeds it (digits, `.`, Backspace,
 //! Enter to apply, Esc to cancel).
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// A single backend row drawn in the Activity view.
@@ -132,6 +134,99 @@ pub const DEFAULT_REFRESH_SECS: f64 = 1.0;
 pub const MIN_REFRESH_SECS: f64 = 0.1;
 pub const MAX_REFRESH_SECS: f64 = 60.0;
 
+/// How long a key-press overlay stays visible after the keystroke. Long
+/// enough that a viewer of a recorded demo can read the label; short
+/// enough to feel ephemeral during interactive use.
+pub const KEY_OVERLAY_TTL: Duration = Duration::from_millis(1_200);
+
+/// Sortable columns in the Activity view. Cycled left/right with `<` /
+/// `>`; direction toggled with `r`. Default = `Qtime` descending (matches
+/// the SQL `order by` and what an operator usually wants in an incident).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    Pid,
+    User,
+    Db,
+    State,
+    Wait,
+    Qtime,
+    Xtime,
+    Locks,
+    Query,
+}
+
+impl SortColumn {
+    /// Stable canonical ordering used by the `<` / `>` cyclers.
+    pub const ALL: &'static [Self] = &[
+        Self::Pid,
+        Self::User,
+        Self::Db,
+        Self::State,
+        Self::Wait,
+        Self::Qtime,
+        Self::Xtime,
+        Self::Locks,
+        Self::Query,
+    ];
+
+    /// Lower-case header label that appears in the table.
+    pub const fn header_label(self) -> &'static str {
+        match self {
+            Self::Pid => "pid",
+            Self::User => "user",
+            Self::Db => "db",
+            Self::State => "state",
+            Self::Wait => "wait",
+            Self::Qtime => "qtime",
+            Self::Xtime => "xtime",
+            Self::Locks => "locks",
+            Self::Query => "query",
+        }
+    }
+
+    /// Default sort direction when this column is first selected. Most
+    /// numeric / time columns are most useful in descending order
+    /// (longest first); textual columns are most useful ascending (A→Z).
+    pub const fn default_desc(self) -> bool {
+        matches!(self, Self::Qtime | Self::Xtime | Self::Locks | Self::Pid)
+    }
+
+    fn position(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|s| *s == self)
+            .expect("ALL contains every SortColumn variant")
+    }
+
+    /// Step `delta` positions through `Self::ALL` (wrapping). `delta` is
+    /// signed so callers can pass `-1` (`<`) or `+1` (`>`); we lift the
+    /// modular arithmetic into `usize` after offsetting by `len` to avoid
+    /// any signed-cast lossiness clippy might flag.
+    fn step(self, delta: isize) -> Self {
+        let len = Self::ALL.len();
+        let pos = self.position();
+        let stepped = if delta >= 0 {
+            #[allow(clippy::cast_sign_loss)]
+            let d = delta as usize % len;
+            (pos + d) % len
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            let d = (-delta) as usize % len;
+            (pos + len - d) % len
+        };
+        Self::ALL[stepped]
+    }
+}
+
+/// Ephemeral on-screen overlay displaying the most recent keystroke.
+/// Surfaces in the corner of the body area for [`KEY_OVERLAY_TTL`] so a
+/// viewer (especially of a recorded demo) can tell what was pressed.
+#[derive(Debug, Clone)]
+pub struct KeyOverlay {
+    pub label: String,
+    pub expires_at: Instant,
+}
+
 /// UI state for `/top`. Pure data — no I/O, no side effects.
 #[derive(Debug)]
 pub struct App {
@@ -156,6 +251,13 @@ pub struct App {
     pub extended: bool,
     /// Footer prompt state. `Some` when the user is typing into a prompt.
     pub prompt: Option<PromptState>,
+    /// Currently active sort column; `<` / `>` cycle, `r` toggles.
+    pub sort_column: SortColumn,
+    /// `true` when sorting descending (largest first); toggled by `r`.
+    pub sort_desc: bool,
+    /// Most recent keystroke and its overlay expiration time. Read by the
+    /// renderer to draw a temporary key indicator in the corner.
+    pub last_key: Option<KeyOverlay>,
 }
 
 impl Default for App {
@@ -170,6 +272,9 @@ impl Default for App {
             refresh_secs: DEFAULT_REFRESH_SECS,
             extended: false,
             prompt: None,
+            sort_column: SortColumn::Qtime,
+            sort_desc: true,
+            last_key: None,
         }
     }
 }
@@ -257,6 +362,13 @@ impl App {
     /// event loop. The exit signal is also stored in `should_exit` so
     /// renderers/tests can observe it.
     pub fn handle_key(&mut self, key: KeyEvent, page_size: usize) -> bool {
+        // Record the keystroke for the corner overlay before any branch
+        // returns. Suppressed inside the prompt so each typed digit does
+        // not flash in the overlay (the prompt buffer is the indicator).
+        if self.prompt.is_none() {
+            self.note_key(&key);
+        }
+
         // Active prompt swallows almost every key.
         if self.prompt.is_some() {
             self.handle_prompt_key(key);
@@ -279,9 +391,43 @@ impl App {
             KeyCode::End => self.cursor_end(),
             KeyCode::Char('s') => self.open_refresh_prompt(),
             KeyCode::Char('e') => self.extended = !self.extended,
+            KeyCode::Char('<' | ',') => self.cycle_sort(-1),
+            KeyCode::Char('>' | '.') => self.cycle_sort(1),
+            KeyCode::Char('r') => self.sort_desc = !self.sort_desc,
             _ => {}
         }
         self.should_exit
+    }
+
+    /// Cycle the active sort column by `delta` positions (left = -1,
+    /// right = +1). Direction resets to the column's default each time
+    /// the column itself changes; `r` toggles direction without moving.
+    pub fn cycle_sort(&mut self, delta: isize) {
+        let next = self.sort_column.step(delta);
+        if next != self.sort_column {
+            self.sort_column = next;
+            self.sort_desc = next.default_desc();
+        }
+    }
+
+    fn note_key(&mut self, key: &KeyEvent) {
+        let label = format_key_label(key);
+        if label.is_empty() {
+            return;
+        }
+        self.last_key = Some(KeyOverlay {
+            label,
+            expires_at: Instant::now() + KEY_OVERLAY_TTL,
+        });
+    }
+
+    /// Read the key overlay if it is still fresh. Renderers call this
+    /// instead of touching `last_key` directly so the staleness check
+    /// stays in one place.
+    pub fn fresh_key_overlay(&self) -> Option<&KeyOverlay> {
+        self.last_key
+            .as_ref()
+            .filter(|ko| Instant::now() < ko.expires_at)
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) {
@@ -310,6 +456,143 @@ fn format_refresh_seed(secs: f64) -> String {
         format!("{secs:.0}")
     } else {
         format!("{secs:.2}")
+    }
+}
+
+/// Default `--ts-format` for `--batch` output. Plain ISO 8601 UTC,
+/// chosen to be unambiguous for log files and grep-friendly.
+pub const DEFAULT_TS_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
+
+/// Calendar date / time-of-day broken out of a Unix timestamp (UTC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalDate {
+    pub year: i64,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+/// Convert Unix `secs` (UTC) into a calendar date. Uses Howard Hinnant's
+/// `civil_from_days` algorithm so we avoid pulling chrono in for `--batch`
+/// timestamp formatting.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn cal_date_utc(unix_secs: i64) -> CalDate {
+    let day_secs = unix_secs.rem_euclid(86_400);
+    let days = unix_secs.div_euclid(86_400);
+
+    let hour = (day_secs / 3600) as u8;
+    let minute = ((day_secs % 3600) / 60) as u8;
+    let second = (day_secs % 60) as u8;
+
+    // Howard Hinnant — http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8;
+    if month <= 2 {
+        year += 1;
+    }
+
+    CalDate {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    }
+}
+
+/// Format a Unix timestamp using a tiny strftime subset:
+///
+/// | Token | Expansion              |
+/// |-------|------------------------|
+/// | `%Y`  | 4-digit year           |
+/// | `%m`  | 2-digit month          |
+/// | `%d`  | 2-digit day            |
+/// | `%H`  | 2-digit hour (24h)     |
+/// | `%M`  | 2-digit minute         |
+/// | `%S`  | 2-digit second         |
+/// | `%T`  | `HH:MM:SS`             |
+/// | `%F`  | `YYYY-MM-DD`           |
+/// | `%s`  | unix seconds since epoch |
+/// | `%z`  | `+0000` (always UTC)   |
+/// | `%Z`  | `UTC`                  |
+/// | `%%`  | literal `%`            |
+///
+/// Unknown specifiers pass through verbatim (`%X` → `%X`) so a typo is
+/// visible in the output rather than silently swallowed.
+pub fn format_strftime(fmt: &str, unix_secs: i64) -> String {
+    use std::fmt::Write;
+
+    let cal = cal_date_utc(unix_secs);
+    let mut out = String::with_capacity(fmt.len());
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('Y') => write!(out, "{:04}", cal.year).expect("write to String"),
+            Some('m') => write!(out, "{:02}", cal.month).expect("write to String"),
+            Some('d') => write!(out, "{:02}", cal.day).expect("write to String"),
+            Some('H') => write!(out, "{:02}", cal.hour).expect("write to String"),
+            Some('M') => write!(out, "{:02}", cal.minute).expect("write to String"),
+            Some('S') => write!(out, "{:02}", cal.second).expect("write to String"),
+            Some('T') => write!(out, "{:02}:{:02}:{:02}", cal.hour, cal.minute, cal.second)
+                .expect("write to String"),
+            Some('F') => write!(out, "{:04}-{:02}-{:02}", cal.year, cal.month, cal.day)
+                .expect("write to String"),
+            Some('s') => write!(out, "{unix_secs}").expect("write to String"),
+            Some('z') => out.push_str("+0000"),
+            Some('Z') => out.push_str("UTC"),
+            // A literal `%%` and a trailing bare `%` both render as one `%`.
+            Some('%') | None => out.push('%'),
+            Some(other) => {
+                out.push('%');
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// Compact human label for a key press, used by the corner overlay.
+/// Uses arrow glyphs for cursor keys and named labels for
+/// non-printable special keys; printable characters render as themselves
+/// (with `Ctrl-` prefix when modified).
+pub fn format_key_label(key: &KeyEvent) -> String {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Up => "↑".into(),
+        KeyCode::Down => "↓".into(),
+        KeyCode::Left => "←".into(),
+        KeyCode::Right => "→".into(),
+        KeyCode::PageUp => "PgUp".into(),
+        KeyCode::PageDown => "PgDn".into(),
+        KeyCode::Home => "Home".into(),
+        KeyCode::End => "End".into(),
+        KeyCode::Tab => "Tab".into(),
+        KeyCode::BackTab => "⇧Tab".into(),
+        KeyCode::Enter => "↩".into(),
+        KeyCode::Esc => "Esc".into(),
+        KeyCode::Backspace => "⌫".into(),
+        KeyCode::Delete => "⌦".into(),
+        KeyCode::Char(c) if ctrl => format!("C-{c}"),
+        KeyCode::Char(c) => c.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -554,5 +837,160 @@ mod tests {
         let exit = app.handle_key(key(KeyCode::Char('q')), 10);
         assert!(!exit);
         assert!(app.prompt.is_some());
+    }
+
+    // -- Sort cycling ---------------------------------------------------------
+
+    #[test]
+    fn default_sort_is_qtime_descending() {
+        let app = App::new();
+        assert_eq!(app.sort_column, SortColumn::Qtime);
+        assert!(app.sort_desc);
+    }
+
+    #[test]
+    fn gt_advances_sort_column_lt_rewinds() {
+        let mut app = App::new();
+        // Default = Qtime; > goes to Xtime.
+        app.handle_key(key(KeyCode::Char('>')), 10);
+        assert_eq!(app.sort_column, SortColumn::Xtime);
+        app.handle_key(key(KeyCode::Char('>')), 10);
+        assert_eq!(app.sort_column, SortColumn::Locks);
+        app.handle_key(key(KeyCode::Char('<')), 10);
+        assert_eq!(app.sort_column, SortColumn::Xtime);
+    }
+
+    #[test]
+    fn sort_cycler_wraps_around() {
+        let mut app = App::new();
+        // From Qtime, two `<` lands on Wait then State (relative).
+        // From Pid, one `<` wraps to Query (the last column).
+        app.sort_column = SortColumn::Pid;
+        app.handle_key(key(KeyCode::Char('<')), 10);
+        assert_eq!(app.sort_column, SortColumn::Query);
+        app.handle_key(key(KeyCode::Char('>')), 10);
+        assert_eq!(app.sort_column, SortColumn::Pid);
+    }
+
+    #[test]
+    fn r_toggles_direction_only() {
+        let mut app = App::new();
+        let col = app.sort_column;
+        let was_desc = app.sort_desc;
+        app.handle_key(key(KeyCode::Char('r')), 10);
+        assert_eq!(app.sort_column, col);
+        assert_eq!(app.sort_desc, !was_desc);
+    }
+
+    #[test]
+    fn changing_column_resets_to_default_direction() {
+        let mut app = App::new();
+        // Start at Qtime desc, reverse via r → Qtime asc.
+        app.handle_key(key(KeyCode::Char('r')), 10);
+        assert!(!app.sort_desc);
+        // Cycle to Xtime — desc by default.
+        app.handle_key(key(KeyCode::Char('>')), 10);
+        assert_eq!(app.sort_column, SortColumn::Xtime);
+        assert!(app.sort_desc);
+        // Cycle into User (textual default → asc).
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Char('<')), 10);
+        }
+        assert_eq!(app.sort_column, SortColumn::User);
+        assert!(!app.sort_desc);
+    }
+
+    // -- Key overlay ----------------------------------------------------------
+
+    #[test]
+    fn pressing_a_key_seeds_the_overlay_with_its_label() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Down), 10);
+        let ko = app
+            .fresh_key_overlay()
+            .expect("overlay should be set after a keypress");
+        assert_eq!(ko.label, "↓");
+
+        app.handle_key(key(KeyCode::Char('e')), 10);
+        assert_eq!(app.fresh_key_overlay().unwrap().label, "e");
+
+        // Comma is mapped to "<" only when shifted; the bare "," still
+        // acts as a sort-cycler but renders as "," in the overlay.
+        app.handle_key(key(KeyCode::Char('<')), 10);
+        assert_eq!(app.fresh_key_overlay().unwrap().label, "<");
+    }
+
+    #[test]
+    fn key_overlay_is_suppressed_inside_prompt() {
+        let mut app = App::new();
+        app.open_refresh_prompt();
+        // open_refresh_prompt itself does not touch the overlay; subsequent
+        // typed chars should not surface in the corner.
+        app.handle_key(key(KeyCode::Char('5')), 10);
+        assert!(app.fresh_key_overlay().is_none());
+    }
+
+    // -- strftime helper -----------------------------------------------------
+
+    #[test]
+    fn cal_date_utc_anchor_points() {
+        // 1970-01-01T00:00:00Z
+        let z = cal_date_utc(0);
+        assert_eq!(
+            (z.year, z.month, z.day, z.hour, z.minute, z.second),
+            (1970, 1, 1, 0, 0, 0)
+        );
+        // 2023-11-14T22:13:20Z (1_700_000_000)
+        let n = cal_date_utc(1_700_000_000);
+        assert_eq!(
+            (n.year, n.month, n.day, n.hour, n.minute, n.second),
+            (2023, 11, 14, 22, 13, 20)
+        );
+        // Leap-year guard: 2020-02-29
+        let leap = cal_date_utc(1_582_934_400);
+        assert_eq!((leap.year, leap.month, leap.day), (2020, 2, 29));
+    }
+
+    #[test]
+    fn format_strftime_default_iso8601() {
+        let s = format_strftime(DEFAULT_TS_FORMAT, 1_700_000_000);
+        assert_eq!(s, "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn format_strftime_subset_tokens() {
+        let t = 1_700_000_000;
+        assert_eq!(format_strftime("%F %T", t), "2023-11-14 22:13:20");
+        assert_eq!(format_strftime("%H:%M:%S", t), "22:13:20");
+        assert_eq!(format_strftime("%Y%m%d-%H%M%S", t), "20231114-221320");
+        assert_eq!(format_strftime("%s", t), "1700000000");
+        assert_eq!(format_strftime("%z %Z", t), "+0000 UTC");
+        assert_eq!(format_strftime("100%%", t), "100%");
+    }
+
+    #[test]
+    fn format_strftime_unknown_token_passes_through() {
+        assert_eq!(
+            format_strftime("[%Q]", 0),
+            "[%Q]",
+            "unknown specifier should not be swallowed"
+        );
+        // A trailing bare % survives as a literal (no panic).
+        assert_eq!(format_strftime("ends with %", 0), "ends with %");
+    }
+
+    #[test]
+    fn fresh_key_overlay_expires_after_ttl() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char('e')), 10);
+        assert!(app.fresh_key_overlay().is_some());
+
+        // Stamp it as already-expired by hand — we cannot freeze time, so
+        // the test exercises the staleness check, not the wall-clock TTL.
+        let ko = app.last_key.as_mut().unwrap();
+        ko.expires_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .expect("clock has advanced past 1 ms since boot");
+        assert!(app.fresh_key_overlay().is_none());
     }
 }

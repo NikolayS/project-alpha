@@ -46,7 +46,7 @@ These match psql behaviour and must not be changed:
 |---|---|
 | `/dba [subcommand]` | database diagnostics (activity, locks, bloat, etc.) |
 | `/ash [args]` | active session history (requires pg_ash extension) |
-| `/top [--once]` | live TUI monitor — top-like view of `pg_stat_activity`. `--once` prints a single text snapshot (CI / scripting) |
+| `/top [flags]` | live TUI monitor — top-like view of `pg_stat_activity`. Flags: `--once` (one snapshot), `--batch` / `-b` (continuous text log), `--refresh <n>` / `-s <n>` (interval, 0.1–60 s), `--ts-format <fmt>` (strftime prefix used by `--batch`, default `%Y-%m-%dT%H:%M:%SZ`) |
 
 ### Input/execution modes
 

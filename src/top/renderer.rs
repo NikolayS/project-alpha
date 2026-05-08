@@ -39,6 +39,9 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
     render_tabs(frame, chunks[1], app, theme);
     render_body(frame, chunks[2], app, theme);
     render_footer(frame, chunks[3], app, theme);
+    // Key-press overlay rides on top of the body in the upper-right corner;
+    // drawn last so it always wins the cell.
+    render_key_overlay(frame, chunks[2], app, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +222,31 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 // ---------------------------------------------------------------------------
+// Key-press overlay
+// ---------------------------------------------------------------------------
+
+fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, theme: &Theme) {
+    let Some(ko) = app.fresh_key_overlay() else {
+        return;
+    };
+    // ` ⌨ <label> ` with one cell of padding either side.
+    let label = format!(" ⌨ {} ", ko.label);
+    let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+    if body_area.width <= label_chars + 2 || body_area.height < 2 {
+        return;
+    }
+    // Pin to the upper-right corner of the body, just inside the border.
+    let x = body_area.x + body_area.width.saturating_sub(label_chars + 1);
+    let y = body_area.y;
+    let area = Rect::new(x, y, label_chars, 1);
+    let style = theme
+        .title
+        .add_modifier(Modifier::REVERSED)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(Paragraph::new(Span::styled(label, style)), area);
+}
+
+// ---------------------------------------------------------------------------
 // Footer
 // ---------------------------------------------------------------------------
 
@@ -242,12 +270,14 @@ fn build_default_footer(theme: &Theme) -> Line<'_> {
         Span::styled("quit  ", theme.footer),
         Span::styled("↑↓ ", theme.title),
         Span::styled("move  ", theme.footer),
+        Span::styled("</> ", theme.title),
+        Span::styled("sort  ", theme.footer),
+        Span::styled("r ", theme.title),
+        Span::styled("reverse  ", theme.footer),
         Span::styled("e ", theme.title),
         Span::styled("extended  ", theme.footer),
         Span::styled("s ", theme.title),
-        Span::styled("set delay  ", theme.footer),
-        Span::styled("PgUp/PgDn ", theme.title),
-        Span::styled("page  ", theme.footer),
+        Span::styled("set delay", theme.footer),
     ])
 }
 
@@ -515,6 +545,66 @@ mod tests {
         assert!(
             !dump.contains(" quit  "),
             "default footer must be replaced by the prompt: {dump}"
+        );
+    }
+
+    #[test]
+    fn active_sort_column_renders_with_arrow_indicator() {
+        use crate::top::state::SortColumn;
+
+        // Default = Qtime descending → expect "qtime▼" in the table header.
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        let buf = render_into(140, 30, &app);
+        assert!(
+            buffer_to_string(&buf).contains("qtime▼"),
+            "expected qtime▼ on default sort: {}",
+            buffer_to_string(&buf)
+        );
+
+        // Switch to Pid asc — sort_desc inherits Pid's default (desc),
+        // so r toggles to asc.
+        app.sort_column = SortColumn::Pid;
+        app.sort_desc = false;
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(dump.contains("pid▲"), "expected pid▲ on Pid asc: {dump}");
+        // The previously-active column should not still carry an arrow.
+        assert!(
+            !dump.contains("qtime▼") && !dump.contains("qtime▲"),
+            "qtime should not be marked active any more: {dump}"
+        );
+    }
+
+    #[test]
+    fn key_overlay_appears_after_a_recent_keypress() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        // Press Down — sets `last_key` with the "↓" label and a fresh TTL.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 10);
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(dump.contains("⌨ ↓"), "expected ⌨ ↓ overlay: {dump}");
+    }
+
+    #[test]
+    fn key_overlay_omits_after_expiry() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE), 10);
+        // Force-expire the overlay.
+        app.last_key.as_mut().unwrap().expires_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .expect("clock has advanced past 1 ms since boot");
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            !dump.contains("⌨"),
+            "expired overlay should not render: {dump}"
         );
     }
 

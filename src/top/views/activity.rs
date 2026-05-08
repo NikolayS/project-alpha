@@ -11,13 +11,15 @@
 //! Wait coloring follows the `pg_ash` color scheme — see
 //! [`pg_ash`](https://github.com/NikolayS/pg_ash) `docs/COLOR_SCHEME.md`.
 
+use std::cmp::Ordering;
+
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::top::state::{ActivityRow, App, Snapshot};
+use crate::top::state::{ActivityRow, App, Snapshot, SortColumn};
 use crate::top::theme::Theme;
 
 /// Render the activity table into `area`. The caller is responsible for
@@ -88,6 +90,13 @@ fn render_table(frame: &mut Frame, area: Rect, snap: &Snapshot, app: &App, theme
         ]
     };
 
+    // Sort the rows in Rust according to the App's current sort column /
+    // direction. SQL only provides the initial qtime-desc ordering; the
+    // user-facing sort is applied here so that `<` / `>` / `r` take effect
+    // immediately without re-sampling.
+    let mut sorted: Vec<&ActivityRow> = snap.rows.iter().collect();
+    sort_rows(&mut sorted, app.sort_column, app.sort_desc);
+
     let widths: Vec<Constraint> = if extended {
         vec![
             Constraint::Length(7),  // pid
@@ -117,17 +126,17 @@ fn render_table(frame: &mut Frame, area: Rect, snap: &Snapshot, app: &App, theme
         ]
     };
 
+    let arrow = if app.sort_desc { "▼" } else { "▲" };
     let header = Row::new(
         header_cells
             .into_iter()
-            .map(|h| Cell::from(Span::styled(h, theme.header)))
+            .map(|h| build_header_cell(h, app.sort_column, arrow, theme))
             .collect::<Vec<_>>(),
     )
     .height(1)
     .style(theme.header_row);
 
-    let rows: Vec<Row> = snap
-        .rows
+    let rows: Vec<Row> = sorted
         .iter()
         .map(|r| build_row(r, extended, theme))
         .collect();
@@ -179,6 +188,59 @@ fn build_row<'a>(r: &'a ActivityRow, extended: bool, theme: &'a Theme) -> Row<'a
     };
 
     Row::new(cells)
+}
+
+/// Header cell renderer that highlights the column corresponding to the
+/// active sort. The active column shows ` <name>▼ ` (or ` ▲ ` for asc) in
+/// the title style; inactive columns render in the muted header style.
+fn build_header_cell<'a>(
+    label: &'a str,
+    sort: SortColumn,
+    arrow: &'a str,
+    theme: &'a Theme,
+) -> Cell<'a> {
+    if label == sort.header_label() {
+        Cell::from(Line::from(vec![
+            Span::styled(label, theme.header.add_modifier(Modifier::UNDERLINED)),
+            Span::raw(arrow),
+        ]))
+    } else {
+        Cell::from(Span::styled(label, theme.header))
+    }
+}
+
+/// Sort rows in-place according to the active column / direction. Stable
+/// sort is preferred so equal-key rows preserve the SQL-side ordering.
+pub(in crate::top) fn sort_rows(rows: &mut [&ActivityRow], col: SortColumn, desc: bool) {
+    rows.sort_by(|a, b| {
+        let ord = match col {
+            SortColumn::Pid => a.pid.cmp(&b.pid),
+            SortColumn::User => a.usename.cmp(&b.usename),
+            SortColumn::Db => a.datname.cmp(&b.datname),
+            SortColumn::State => a.state.cmp(&b.state),
+            SortColumn::Wait => format_wait_label(a).cmp(&format_wait_label(b)),
+            SortColumn::Qtime => cmp_opt_f64(a.qtime_secs, b.qtime_secs),
+            SortColumn::Xtime => cmp_opt_f64(a.xtime_secs, b.xtime_secs),
+            SortColumn::Locks => a.locks_held.cmp(&b.locks_held),
+            SortColumn::Query => a.query.cmp(&b.query),
+        };
+        if desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+}
+
+fn cmp_opt_f64(a: Option<f64>, b: Option<f64>) -> Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        // Treat None as "less than" any concrete value so descending sort
+        // pushes idle backends below active ones.
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 /// Render the `wait` column label, matching `pg_ash`'s `Type:Event` format.
