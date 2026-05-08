@@ -297,9 +297,7 @@ impl App {
                 prompt.buffer.pop();
             }
             // Reasonable upper bound on prompt length keeps the buffer bounded.
-            KeyCode::Char(c)
-                if (c.is_ascii_digit() || c == '.') && prompt.buffer.len() < 10 =>
-            {
+            KeyCode::Char(c) if (c.is_ascii_digit() || c == '.') && prompt.buffer.len() < 10 => {
                 prompt.buffer.push(c);
             }
             _ => {}
