@@ -97,8 +97,7 @@ impl Theme {
 /// Trades a tiny duplication for module isolation.
 fn terminal_has_truecolor() -> bool {
     std::env::var("COLORTERM")
-        .map(|v| v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"))
-        .unwrap_or(false)
+        .is_ok_and(|v| v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"))
 }
 
 #[cfg(test)]
