@@ -296,11 +296,11 @@ impl App {
             KeyCode::Backspace => {
                 prompt.buffer.pop();
             }
-            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
-                // Reasonable upper bound on prompt length.
-                if prompt.buffer.len() < 10 {
-                    prompt.buffer.push(c);
-                }
+            // Reasonable upper bound on prompt length keeps the buffer bounded.
+            KeyCode::Char(c)
+                if (c.is_ascii_digit() || c == '.') && prompt.buffer.len() < 10 =>
+            {
+                prompt.buffer.push(c);
             }
             _ => {}
         }
