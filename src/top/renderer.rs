@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use super::state::{App, Snapshot, View};
 use super::theme::Theme;
-use super::views::activity;
+use super::views::activity::{self, scrub_terminal_unsafe};
 
 /// Min terminal size below which we render a "too small" stub instead of the
 /// real UI. 24 rows × 80 cols matches the project-wide minimum used by
@@ -78,17 +78,18 @@ fn build_summary_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<
         };
         Line::from(vec![
             Span::styled("db ", theme.muted),
-            Span::raw(s.server.db_name.clone()),
+            Span::raw(scrub_terminal_unsafe(&s.server.db_name)),
             Span::styled("  user ", theme.muted),
-            Span::raw(s.server.user.clone()),
+            Span::raw(scrub_terminal_unsafe(&s.server.user)),
             Span::styled("  pg ", theme.muted),
-            Span::raw(s.server.pg_version.clone()),
+            Span::raw(scrub_terminal_unsafe(&s.server.pg_version)),
             Span::styled("  ", theme.muted),
             Span::raw(recovery),
             Span::styled("  uptime ", theme.muted),
             Span::raw(format_uptime(s.server.uptime_secs)),
-            Span::styled("  as of T", theme.muted),
-            Span::raw(s.ts.to_string()),
+            Span::styled("  @ ", theme.muted),
+            Span::raw(format_clock_utc(s.ts)),
+            Span::styled(" UTC", theme.muted),
         ])
     } else {
         Line::from(Span::styled("connecting…", theme.muted))
@@ -140,6 +141,22 @@ fn format_uptime(secs: i64) -> String {
     } else {
         format!("{}d{:02}h", s / 86_400, (s % 86_400) / 3600)
     }
+}
+
+/// Format a Unix timestamp as `HH:MM:SS` UTC clock time.
+///
+/// Pre-epoch (negative) values render as `"—"` so the header doesn't
+/// surface a misleading time. We avoid pulling in chrono — only modular
+/// integer arithmetic is needed.
+fn format_clock_utc(ts: i64) -> String {
+    if ts < 0 {
+        return "—".to_owned();
+    }
+    let day_secs = ts.rem_euclid(86_400);
+    let h = day_secs / 3600;
+    let m = (day_secs % 3600) / 60;
+    let s = day_secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 // ---------------------------------------------------------------------------
@@ -205,10 +222,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn truncate_err(s: &str, max: usize) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect();
+    let cleaned = scrub_terminal_unsafe(s);
     if cleaned.chars().count() <= max {
         cleaned
     } else {
@@ -382,6 +396,44 @@ mod tests {
         );
     }
 
+    /// End-to-end safety: a malicious `pg_stat_activity` row with an ANSI
+    /// escape in `application_name`/`query`/`db_name` must not produce any
+    /// ESC byte in any rendered cell symbol. This protects DBAs whose
+    /// terminals would otherwise execute the embedded escape.
+    #[test]
+    fn renderer_strips_ansi_escapes_from_user_controllable_fields() {
+        use crate::top::state::{ActivityRow, ServerSummary};
+        let mut app = App::new();
+        app.set_snapshot(Snapshot {
+            ts: 1,
+            server: ServerSummary {
+                db_name: "evil\x1b[2J".into(),
+                user: "nik\x1b[31m".into(),
+                pg_version: "16.4".into(),
+                ..Default::default()
+            },
+            rows: vec![ActivityRow {
+                pid: 1,
+                usename: "u".into(),
+                datname: "d".into(),
+                application_name: "psql\x1b[33mPWNED".into(),
+                state: "active".into(),
+                query: "select 1\x1b[2J -- pwn\x07".into(),
+                ..Default::default()
+            }],
+        });
+        let buf = render_into(140, 30, &app);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                assert!(
+                    !sym.as_bytes().iter().any(|b| *b == 0x1b || *b == 0x07),
+                    "cell ({x},{y}) contains a control byte: {sym:?}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn footer_shows_error_when_set() {
         let mut app = App::new();
@@ -391,6 +443,53 @@ mod tests {
         let dump = buffer_to_string(&buf);
         assert!(dump.contains("error"), "error label missing");
         assert!(dump.contains("connection lost"), "error message missing");
+    }
+
+    /// Inspect cell-level styling: when the sampler is fresh, the connection
+    /// dot must use `theme.status_ok`; after a missed tick it must flip to
+    /// `theme.status_stale`. Without this, a bug that swaps the two styles
+    /// would pass the dump-substring tests above.
+    #[test]
+    fn connection_led_color_reflects_freshness() {
+        let theme = Theme::default_theme(); // use the colored theme so fg differs
+
+        // Fresh: status_ok
+        let mut fresh = App::new();
+        fresh.set_snapshot(fixture_snapshot());
+        let backend = TestBackend::new(140, 30);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| draw(f, &fresh, &theme)).expect("draw");
+        let dot_fg_fresh = find_dot_fg(term.backend().buffer());
+        assert_eq!(
+            dot_fg_fresh,
+            Some(theme.status_ok.fg.expect("status_ok must define fg")),
+            "fresh connection dot must use status_ok color",
+        );
+
+        // Stale: status_stale
+        let mut stale = App::new();
+        stale.set_snapshot(fixture_snapshot());
+        stale.note_stale();
+        let backend = TestBackend::new(140, 30);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| draw(f, &stale, &theme)).expect("draw");
+        let dot_fg_stale = find_dot_fg(term.backend().buffer());
+        assert_eq!(
+            dot_fg_stale,
+            Some(theme.status_stale.fg.expect("status_stale must define fg")),
+            "stale connection dot must use status_stale color",
+        );
+    }
+
+    fn find_dot_fg(buf: &ratatui::buffer::Buffer) -> Option<ratatui::style::Color> {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == "●" {
+                    return Some(buf[(x, y)].fg);
+                }
+            }
+        }
+        None
     }
 
     #[test]
@@ -413,6 +512,31 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn format_clock_utc_handles_epoch_and_anchor() {
+        assert_eq!(super::format_clock_utc(0), "00:00:00");
+        // 1_700_000_000 = 2023-11-14T22:13:20Z (sanity-checked manually).
+        assert_eq!(super::format_clock_utc(1_700_000_000), "22:13:20");
+        // Negative or pre-epoch values fall back to "—".
+        assert_eq!(super::format_clock_utc(-1), "—");
+    }
+
+    #[test]
+    fn header_renders_human_readable_clock() {
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        let buf = render_into(140, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            !dump.contains("T1700000000"),
+            "raw unix epoch must not be rendered in the header: {dump}"
+        );
+        assert!(
+            dump.contains("22:13:20 UTC"),
+            "header must render snapshot ts as HH:MM:SS UTC: {dump}"
+        );
     }
 
     #[test]

@@ -170,9 +170,38 @@ fn build_row<'a>(r: &'a ActivityRow, selected: bool, wide: bool, theme: &'a Them
     }
 }
 
+/// Strip every control character (incl. ESC, BEL, BS, CR, LF, TAB) from a
+/// string before letting it reach ratatui. Any field originating from
+/// `pg_stat_activity` — `application_name`, `query`, `usename`, `datname`,
+/// `client_addr`, `state`, `wait_event_type`, `wait_event`, `backend_type` —
+/// is settable by any connected Postgres client and could otherwise embed
+/// ANSI escape sequences that the DBA's terminal would execute.
+///
+/// Whitespace control characters (`\t`, `\n`, `\r`) collapse to a single
+/// space so multi-line queries still read naturally; other control bytes
+/// are dropped entirely. Printable Unicode is preserved.
+pub(in crate::top) fn scrub_terminal_unsafe(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == '\t' || c == '\n' || c == '\r' {
+                ' '
+            } else if c.is_control() {
+                // ESC (\x1b), BEL (\x07), BS (\x08), DEL (\x7f), and the C1
+                // control range — drop them. They have no place in a TUI
+                // table cell and are the entire injection vector.
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .filter(|c| *c != '\u{FFFD}')
+        .collect()
+}
+
 fn truncate(s: &str, max: usize) -> String {
+    let s = scrub_terminal_unsafe(s);
     if s.chars().count() <= max {
-        s.to_owned()
+        s
     } else {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
@@ -181,16 +210,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn squash_query(s: &str) -> String {
-    let collapsed: String = s
-        .chars()
-        .map(|c| {
-            if c == '\n' || c == '\r' || c == '\t' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
+    let collapsed = scrub_terminal_unsafe(s);
     collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -286,6 +306,64 @@ mod tests {
     fn squash_query_collapses_whitespace() {
         let q = "select\n    *\nfrom\tt\n  where  x = 1";
         assert_eq!(squash_query(q), "select * from t where x = 1");
+    }
+
+    /// Regression test for terminal-escape injection: `application_name`,
+    /// `query`, `usename`, `client_addr` etc. are all freely settable by any
+    /// connected Postgres client (e.g.
+    /// `SET application_name = E'\x1b[2J'`). They must be stripped of control
+    /// characters before being passed to ratatui, otherwise an attacker can
+    /// emit ANSI escapes that another DBA's terminal will execute.
+    #[test]
+    fn user_controllable_strings_strip_control_characters() {
+        let raw = "victim\x1b[2J\x1b[31mPWNED\x07\x08\rback\nnewline\ttab";
+        let scrubbed = super::scrub_terminal_unsafe(raw);
+        assert!(
+            !scrubbed.contains('\x1b'),
+            "ESC must be stripped: {scrubbed:?}"
+        );
+        assert!(
+            !scrubbed.contains('\x07'),
+            "BEL must be stripped: {scrubbed:?}"
+        );
+        assert!(
+            !scrubbed.contains('\x08'),
+            "BS must be stripped: {scrubbed:?}"
+        );
+        assert!(
+            !scrubbed.contains('\r'),
+            "CR must be stripped: {scrubbed:?}"
+        );
+        assert!(
+            !scrubbed.contains('\n'),
+            "LF must be stripped: {scrubbed:?}"
+        );
+        // Tabs become spaces (preserved as whitespace, not as a control byte).
+        assert!(
+            !scrubbed.contains('\t'),
+            "TAB must be normalized: {scrubbed:?}"
+        );
+        // Printable characters survive intact.
+        assert!(scrubbed.contains("victim"));
+        assert!(scrubbed.contains("PWNED"));
+        assert!(scrubbed.contains("back"));
+        assert!(scrubbed.contains("newline"));
+    }
+
+    #[test]
+    fn squash_query_strips_ansi_escapes() {
+        let q = "select 1\x1b[2J\x1b[31m -- malicious";
+        let out = squash_query(q);
+        assert!(!out.contains('\x1b'), "ESC must not survive: {out:?}");
+        assert!(out.contains("select 1"));
+    }
+
+    #[test]
+    fn truncate_strips_ansi_escapes() {
+        // Even when the field is short enough not to truncate, it should be
+        // sanitized.
+        let out = truncate("user\x1b[2J", 10);
+        assert!(!out.contains('\x1b'), "ESC must not survive: {out:?}");
     }
 
     #[test]

@@ -147,7 +147,7 @@ state}.rs`) so reviewers can pattern-match. New code lives under
                                                    ▼
                        ┌───────────────────────────────────────────────────┐
                        │                src/top/mod.rs                     │
-                       │  • run_top(args, conn)                            │
+                       │  • run_top(client, settings, args) -- inline loop │
                        │  • TUI lifecycle: enter raw + alt-screen          │
                        │  • crossterm event loop, redraw budget            │
                        └─────┬───────────────┬───────────────┬─────────────┘
@@ -155,13 +155,13 @@ state}.rs`) so reviewers can pattern-match. New code lives under
                              ▼               ▼               ▼
                     ┌────────────────┐ ┌──────────────┐ ┌────────────────┐
                     │  state.rs      │ │  sampler.rs  │ │  renderer.rs   │
-                    │  • App         │ │  tokio task  │ │  ratatui Frame │
+                    │  • App         │ │  inline tick │ │  ratatui Frame │
                     │  • View enum   │ │  ─ snapshot  │ │  per-view fns  │
                     │  • RingBuffer  │ │    every     │ │  Tabs, Table,  │
                     │  • Filter/Sort │ │    refresh_  │ │  Sparkline,    │
                     │  • KillSpec    │ │    interval  │ │  Gauge, Chart  │
-                    │  • Theme       │ │  ─ system    │ │  + Overlays    │
-                    │  • Settings    │ │    procfs    │ │                │
+                    │  • Theme       │ │  ─ DB stats  │ │  + Overlays    │
+                    │  • Settings    │ │    only (v1) │ │                │
                     └──────┬─────────┘ └──────┬───────┘ └────────┬───────┘
                            │                  │                  │
                            ▼                  ▼                  ▼
@@ -189,18 +189,24 @@ state}.rs`) so reviewers can pattern-match. New code lives under
 
 ### 3.1 Components
 
-- **`src/top/mod.rs`** — entry `run_top(args: TopArgs, conn: Arc<Mutex<Client>>)
-  -> Result<()>`. Sets up alt-screen + raw mode (same RAII guard pattern as
-  `src/ash/mod.rs:53`), spawns sampler task, runs event/render loop, restores
-  terminal on drop or panic. Provides `--once` headless path that bypasses
-  the loop and prints JSON/text.
+- **`src/top/mod.rs`** — entry
+  `run_top(client: &Client, settings: &ReplSettings, args: TopArgs) -> Result<()>`
+  in S1 (mirrors `/ash`). Sets up alt-screen + raw mode (same RAII guard
+  pattern as `src/ash/mod.rs:53`), runs the sample → draw → poll-events
+  loop inline, restores terminal on drop or panic. Provides `--once`
+  headless path that bypasses the loop and prints text.
+  *Future evolution:* later sprints may move sampling to a separate
+  `tokio::task` with an `Arc<Mutex<Client>>` once we add the drill-down
+  sub-sampler in S4 (so the overlay can sample at a different rate without
+  blocking the main view loop).
 - **`src/top/state.rs`** — `App` struct: current `View`, `RingBuffer<Snapshot>`,
   `FilterState`, `SortState`, `KillSpec`, `Theme`, `Settings`, `LastError`.
   All UI is a pure projection of `App`.
-- **`src/top/sampler.rs`** — async tokio task. Each tick: timestamp, run the
-  active view's SQL (and the always-on header SQL), optionally read procfs
-  (Linux only, `/proc/{loadavg,stat,meminfo,diskstats,net/dev}`), pack into a
-  `Snapshot`, push into the ring buffer behind a `tokio::sync::watch` channel.
+- **`src/top/sampler.rs`** — runs each tick from inside `run_top`'s loop in
+  S1 (the spec's separate-task design is deferred to a later sprint, see
+  §3.1 above). Each tick: timestamp, run the always-on header SQL plus the
+  active view's SQL, pack into a `Snapshot`, store on `App`. System stats
+  (cpu/mem/io/net) are out of scope for v1 per §4.10.
 - **`src/top/renderer.rs`** — ratatui `draw(frame: &mut Frame, app: &App)`.
   Layout: header bar (3 rows) → tabs (1 row) → body (flex) → footer (1 row).
   Body delegates to a per-view renderer.
@@ -225,13 +231,14 @@ state}.rs`) so reviewers can pattern-match. New code lives under
 
 ### 3.2 Data flow
 
-1. `/top` dispatcher wraps the existing rpg connection in an `Arc<Mutex<…>>`
-   and hands it to the sampler. Sampler holds the lock only for the duration
-   of each query (typically &lt;50 ms).
-2. Each tick (default 1 s), sampler runs the active view SQL plus the
-   header SQL (always-on summary). Optional procfs read on Linux (best-effort,
-   never blocks).
-3. Sampler pushes `Snapshot` via `tokio::sync::watch` to the UI loop.
+1. `/top` dispatcher passes the existing rpg `&Client` straight to `run_top`.
+   In S1 the loop is inline (sampler awaited, then redraw, then event poll);
+   later sprints can lift sampling onto a separate `tokio::task` if the
+   drill-down sub-sampler in S4 needs concurrent rates.
+2. Each tick (default 1 s), the loop runs the active view SQL plus the
+   header SQL (always-on summary). System stats (cpu/mem/io/net) are out of
+   scope for v1 per §4.10.
+3. Snapshot is stored on `App` (single source of truth for the renderer).
 4. UI loop on every crossterm event or watch change calls
    `terminal.draw(|f| renderer::draw(f, &app))`. Frame budget &lt;16 ms; if a
    view query exceeds it, sampler dispatches in a separate `spawn_blocking`
@@ -305,7 +312,7 @@ removes a quoting layer for shell users.
 ```
 ┌─ rpg /top ─ db=prod  user=nik  pg=16.4  uptime=14d ─ load 0.42 0.31 0.28 ─┐
 │ active 17  idle-in-tx 3  waiting 2  TPS  ▁▂▃▅▇█▆▄▂▁  deadlocks  · · · · 1 │
-│ cpu 23%  mem 72%  io 18 MB/s  net 4.2 MB/s              connection ●  rt  │
+│ cpu 23%  mem 72%  io 18 MiB/s  net 4.2 MiB/s            connection ●  rt  │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ [1]Activity  [2]Db  [3]Tables  [4]Idx  [5]Stmts  [6]Repl  [7]Prog  [?]   │
 ├──────────────────────────────────────────────────────────────────────────┤

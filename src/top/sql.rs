@@ -3,9 +3,9 @@
 //! keyword style (`CLAUDE.md` SQL style guide).
 //!
 //! S1 ships two queries: a server-summary header read and the Activity
-//! view body. Later sprints add one query per additional view; the version
-//! gating helper [`SUPPORTED_PG_VERSION_HINT`] is here so they can opt in
-//! per major release.
+//! view body. Later sprints add one query per additional view; views that
+//! need columns gated on PG ≥ 16 should branch at construction time using
+//! the server's `server_version_num` once the sampler exposes it.
 
 /// One-shot server summary used in the header bar.
 ///
@@ -40,8 +40,9 @@ pub const SUMMARY_SQL: &str = r"
 /// backends first and the longest-running queries on top.
 ///
 /// The query is intentionally portable across PG14–PG18: every column used
-/// here exists in PG14's `pg_stat_activity`. Newer columns (e.g.
-/// `query_id` from PG14, `leader_pid`) are excluded to keep S1 minimal.
+/// here exists in PG14's `pg_stat_activity`. Columns available in PG14 but
+/// excluded to keep S1 minimal: `query_id`, `leader_pid`. They will be
+/// added when the drill-down overlay (S4) needs them.
 pub const ACTIVITY_SQL: &str = "
     select
         pid,

@@ -46,7 +46,7 @@ These match psql behaviour and must not be changed:
 |---|---|
 | `/dba [subcommand]` | database diagnostics (activity, locks, bloat, etc.) |
 | `/ash [args]` | active session history (requires pg_ash extension) |
-| `/top` | live TUI monitor — top-like view of `pg_stat_activity` (ratatui) |
+| `/top [--once]` | live TUI monitor — top-like view of `pg_stat_activity`. `--once` prints a single text snapshot (CI / scripting) |
 
 ### Input/execution modes
 
