@@ -301,30 +301,27 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 // Key-press overlay
 // ---------------------------------------------------------------------------
 
+/// 5-row solid-yellow billboard at the lower-right of the body.
+/// Bigger than a 3-row strip so the badge reads as a proper "key
+/// pressed" callout in screenshots. Plain ASCII for the label (no
+/// Unicode fullwidth — that approach produced inconsistent cell-width
+/// handling and a notched right edge in some renderers). Arrow keys
+/// swap to chunky `▲▼◀▶` so they don't look anaemic next to
+/// multi-letter labels. Bright `Color::Yellow` lets terminals map it
+/// to their own theme palette.
+const KEY_OVERLAY_MIN_BOX_W: u16 = 14;
+const KEY_OVERLAY_PADDING: u16 = 10;
+const KEY_OVERLAY_BOX_H: u16 = 5;
+
 fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Theme) {
     let Some(ko) = app.fresh_key_overlay() else {
         return;
     };
 
-    // 3-row billboard at the lower-left of the body. The label is
-    // upscaled to Unicode "fullwidth" (every glyph becomes 2 cells
-    // wide), which is the only way to actually double the visual size
-    // of the character inside a fixed-cell terminal — terminals can't
-    // change cell dimensions mid-frame.
-    //
-    // The "alpha" effect is simulated with a muted olive-yellow bg
-    // instead of pure Color::Yellow. Real alpha doesn't exist in the
-    // VT100 cell model; a dimmer hue reads as semi-transparent without
-    // erasing the underlying text outline. Bold-black fg keeps the
-    // label legible against the muted bg.
-    let upscaled = upscale_label(&ko.label);
-    let label = format!("  {upscaled}  ");
-    let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    // Add per-cell width for fullwidth chars: each 0xFF01..0xFF5E or
-    // 0x3000 char prints across 2 cells, so we need an effective width.
-    let display_w = u16::try_from(visual_width(&label)).unwrap_or(u16::MAX);
-    let inner_w = display_w.max(label_chars);
-    let box_h: u16 = 3;
+    let label = chunky_arrow(&ko.label);
+    let label_w = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+    let inner_w = (label_w + KEY_OVERLAY_PADDING).max(KEY_OVERLAY_MIN_BOX_W);
+    let box_h: u16 = KEY_OVERLAY_BOX_H;
     if body_area.width <= inner_w + 2 || body_area.height < box_h + 1 {
         return;
     }
@@ -340,51 +337,43 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
         .saturating_sub(box_h + 1);
     let area = Rect::new(x, y, inner_w, box_h);
 
-    // Muted olive-yellow ≈ 50 % alpha yellow over a dark terminal. On
-    // 256-color terminals we fall back to the named Yellow.
-    let bg = ratatui::style::Color::Rgb(0xA0, 0x80, 0x18);
     let fill = Style::default()
-        .bg(bg)
+        .bg(ratatui::style::Color::Yellow)
         .fg(ratatui::style::Color::Black)
         .add_modifier(Modifier::BOLD);
 
-    let blank: String = " ".repeat(inner_w as usize);
+    let inner_w_usize = inner_w as usize;
+    let label_chars = label.chars().count();
+    let pad_total = inner_w_usize.saturating_sub(label_chars);
+    let pad_left = pad_total / 2;
+    let pad_right = pad_total - pad_left;
+    let middle = format!("{}{}{}", " ".repeat(pad_left), label, " ".repeat(pad_right),);
+    let blank: String = " ".repeat(inner_w_usize);
+
     let lines = vec![
         Line::from(Span::styled(blank.clone(), fill)),
-        Line::from(Span::styled(label, fill)),
+        Line::from(Span::styled(blank.clone(), fill)),
+        Line::from(Span::styled(middle, fill)),
+        Line::from(Span::styled(blank.clone(), fill)),
         Line::from(Span::styled(blank, fill)),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Translate ASCII-printable characters to their Unicode "fullwidth"
-/// equivalents (each becomes ~2 cells wide). Arrow keys swap to the
-/// chunkier triangular variants. Multi-byte glyphs that already display
-/// at full width pass through unchanged.
-fn upscale_label(s: &str) -> String {
+/// Swap the thin Unicode arrow keys for the chunky triangular variants,
+/// which read better at any cell size. Everything else passes through
+/// unchanged so multi-letter labels (`PgDn`, `Esc`, `Home`, …) stay in
+/// plain ASCII.
+fn chunky_arrow(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '↑' => '▲',
             '↓' => '▼',
             '←' => '◀',
             '→' => '▶',
-            ' ' => '\u{3000}', // ideographic space (full-width)
-            '!'..='~' => char::from_u32(u32::from(c) - 0x21 + 0xFF01).unwrap_or(c),
             other => other,
         })
         .collect()
-}
-
-/// Cell-width estimate. ASCII = 1 cell; fullwidth Latin / ideographic
-/// space / triangular arrows = 2 cells. Good enough for the small set
-/// of glyphs the overlay can produce.
-fn visual_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| match c {
-            '\u{FF01}'..='\u{FF5E}' | '\u{3000}' | '▲' | '▼' | '◀' | '▶' => 2,
-            _ => 1,
-        })
-        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -869,11 +858,11 @@ mod tests {
     }
 
     /// Returns true if any cell in the buffer is filled with the
-    /// overlay's bg color (RGB 0xA0,0x80,0x18). Used as a reliable
-    /// "is the overlay on screen?" check now that the label glyphs
-    /// (▼, fullwidth letters) can also appear elsewhere in the frame.
+    /// overlay's yellow background. Used as a reliable "is the overlay
+    /// on screen?" check now that the label glyphs themselves (▼ etc.)
+    /// can also appear in the body table (sort indicator).
     fn buffer_has_overlay_bg(buf: &ratatui::buffer::Buffer) -> bool {
-        let target = ratatui::style::Color::Rgb(0xA0, 0x80, 0x18);
+        let target = ratatui::style::Color::Yellow;
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
                 if buf[(x, y)].bg == target {
