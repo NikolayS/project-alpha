@@ -7,7 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Frame;
 
-use super::state::{App, PromptKind, PromptState, Snapshot, View};
+use super::state::{
+    AdminMessage, AdminMessageLevel, App, KillRequest, PromptKind, PromptState, Snapshot, View,
+};
 use super::theme::Theme;
 use super::views::activity::{self, scrub_terminal_unsafe};
 
@@ -28,7 +30,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // header (2 inner rows + 2 borders)
+            Constraint::Length(5), // header (3 inner rows + 2 borders)
             Constraint::Length(1), // tabs
             Constraint::Min(3),    // body (sticky table header)
             Constraint::Length(1), // footer
@@ -56,16 +58,21 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.height < 2 {
+    if inner.height < 3 {
         return;
     }
     let snap = app.snapshot.as_ref();
-    // Two inner rows. Each row is itself split into a left and right
-    // paragraph so that the most-actionable values (clock + connection
-    // LED) anchor to the right edge instead of leaving the right side of
-    // the frame blank on wide terminals.
+    // Three inner rows. Each row is split into a left and right paragraph
+    // so the most-actionable values (clock, connection LED) anchor to the
+    // right edge instead of leaving wide screens blank.
+    //
+    //   row 0   db / user / pg / recovery / uptime ……………………… @ HH:MM:SS UTC
+    //   row 1   ● connection counts (active / idle-in-tx / wait / total/max)
+    //   row 2   ops: longest-tx, longest-q, deadlocks, temp-files, av busy/max,
+    //                slots phy active/total, log active/total
     let row0 = Rect::new(inner.x, inner.y, inner.width, 1);
     let row1 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    let row2 = Rect::new(inner.x, inner.y + 2, inner.width, 1);
 
     let row0_split = Layout::default()
         .direction(Direction::Horizontal)
@@ -93,6 +100,40 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             .alignment(ratatui::layout::Alignment::Right),
         row1_split[1],
     );
+    frame.render_widget(Paragraph::new(build_ops_line(snap, theme)), row2);
+}
+
+fn build_ops_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> {
+    if let Some(s) = snap {
+        Line::from(vec![
+            Span::styled("longest-tx ", theme.muted),
+            Span::raw(format_secs_or_dash(s.server.longest_xact_secs)),
+            Span::styled("  longest-q ", theme.muted),
+            Span::raw(format_secs_or_dash(s.server.longest_active_query_secs)),
+            Span::styled("  deadlocks ", theme.muted),
+            Span::raw(s.server.deadlocks_total.to_string()),
+            Span::styled("  temp-files ", theme.muted),
+            Span::raw(s.server.temp_files_total.to_string()),
+            Span::styled("  av ", theme.muted),
+            Span::raw(format!(
+                "{}/{}",
+                s.server.autovacuum_busy, s.server.autovacuum_max
+            )),
+            Span::styled("  slots ", theme.muted),
+            Span::raw(format!(
+                "{}/{}p {}/{}l",
+                s.server.phys_slots_active,
+                s.server.phys_slots,
+                s.server.log_slots_active,
+                s.server.log_slots,
+            )),
+        ])
+    } else {
+        Line::from(Span::styled(
+            "longest-tx –  longest-q –  deadlocks –  temp-files –  av –  slots –",
+            theme.muted,
+        ))
+    }
 }
 
 fn build_clock_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> {
@@ -162,14 +203,6 @@ fn build_counts_line<'a>(snap: Option<&'a Snapshot>, _app: &'a App, theme: &'a T
                 "{}/{}",
                 s.server.total_backends, s.server.max_connections
             )),
-            Span::styled("  longest-tx ", theme.muted),
-            Span::raw(format_secs_or_dash(s.server.longest_xact_secs)),
-            Span::styled("  longest-q ", theme.muted),
-            Span::raw(format_secs_or_dash(s.server.longest_active_query_secs)),
-            Span::styled("  deadlocks ", theme.muted),
-            Span::raw(s.server.deadlocks_total.to_string()),
-            Span::styled("  temp-files ", theme.muted),
-            Span::raw(s.server.temp_files_total.to_string()),
         ])
     } else {
         Line::from(Span::styled(
@@ -294,8 +327,18 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, theme: &The
 // ---------------------------------------------------------------------------
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // Priority order, top to bottom:
+    //   1. text-input prompt (s)         — user typing
+    //   2. kill confirmation (k / K)     — destructive: must be obvious
+    //   3. fresh admin message           — last action's outcome
+    //   4. sampler error                 — connection / SQL surface
+    //   5. default keymap hint
     let line = if let Some(prompt) = app.prompt.as_ref() {
         build_prompt_line(prompt, theme)
+    } else if let Some(req) = app.kill_confirm.as_ref() {
+        build_kill_confirm_line(req, theme)
+    } else if let Some(msg) = fresh_admin_message(app) {
+        build_admin_message_line(msg, theme)
     } else if let Some(err) = app.last_error.as_deref() {
         Line::from(vec![
             Span::styled(" error ", Style::default().fg(ratatui::style::Color::Red)),
@@ -307,6 +350,61 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn build_kill_confirm_line<'a>(req: &'a KillRequest, theme: &'a Theme) -> Line<'a> {
+    let qtime = req.qtime_secs.map_or_else(
+        || "-".to_owned(),
+        |s| {
+            if s < 1.0 {
+                format!("{:.0}ms", s * 1000.0)
+            } else if s < 60.0 {
+                format!("{s:.1}s")
+            } else {
+                format!("{:.0}m", s / 60.0)
+            }
+        },
+    );
+    Line::from(vec![
+        Span::styled(
+            format!(" {} ", req.mode.verb_upper()),
+            Style::default()
+                .bg(ratatui::style::Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            " pid {} ({}@{}, {} {qtime}, ‹{}›)?  ",
+            req.pid, req.usename, req.datname, req.state, req.query_summary,
+        )),
+        Span::styled("[y/N]", theme.title),
+    ])
+}
+
+fn fresh_admin_message(app: &App) -> Option<&AdminMessage> {
+    app.admin_message
+        .as_ref()
+        .filter(|m| std::time::Instant::now() < m.expires_at)
+}
+
+fn build_admin_message_line<'a>(msg: &'a AdminMessage, theme: &'a Theme) -> Line<'a> {
+    let badge_style = match msg.level {
+        AdminMessageLevel::Ok => Style::default()
+            .bg(ratatui::style::Color::Green)
+            .fg(ratatui::style::Color::Black)
+            .add_modifier(Modifier::BOLD),
+        AdminMessageLevel::Err => Style::default()
+            .bg(ratatui::style::Color::Red)
+            .add_modifier(Modifier::BOLD),
+    };
+    let badge = match msg.level {
+        AdminMessageLevel::Ok => " OK ",
+        AdminMessageLevel::Err => " ERR ",
+    };
+    Line::from(vec![
+        Span::styled(badge, badge_style),
+        Span::raw(" "),
+        Span::styled(msg.text.clone(), theme.footer),
+    ])
+}
+
 fn build_default_footer(theme: &Theme) -> Line<'_> {
     Line::from(vec![
         Span::styled(" q ", theme.title),
@@ -315,10 +413,12 @@ fn build_default_footer(theme: &Theme) -> Line<'_> {
         Span::styled("move  ", theme.footer),
         Span::styled("Space ", theme.title),
         Span::styled("refresh  ", theme.footer),
-        Span::styled("</> ", theme.title),
+        Span::styled("←→ ", theme.title),
         Span::styled("sort  ", theme.footer),
         Span::styled("r ", theme.title),
         Span::styled("reverse  ", theme.footer),
+        Span::styled("k/K ", theme.title),
+        Span::styled("cancel/term  ", theme.footer),
         Span::styled("e ", theme.title),
         Span::styled("extended  ", theme.footer),
         Span::styled("s ", theme.title),
@@ -390,6 +490,12 @@ mod tests {
                 longest_active_query_secs: 42.0,
                 deadlocks_total: 0,
                 temp_files_total: 5,
+                autovacuum_busy: 1,
+                autovacuum_max: 3,
+                phys_slots: 2,
+                phys_slots_active: 2,
+                log_slots: 1,
+                log_slots_active: 1,
             },
             rows: vec![
                 ActivityRow {
@@ -568,6 +674,65 @@ mod tests {
         assert!(
             dump.contains("temp-files 5"),
             "temp-files counter missing: {dump}"
+        );
+    }
+
+    #[test]
+    fn header_renders_ops_line_with_autovacuum_and_slots() {
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        let buf = render_into(180, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            dump.contains("av 1/3"),
+            "autovacuum busy/max missing: {dump}"
+        );
+        assert!(
+            dump.contains("slots 2/2p 1/1l"),
+            "replication slot counts missing: {dump}"
+        );
+    }
+
+    #[test]
+    fn footer_shows_kill_confirmation_when_pending() {
+        use crate::top::state::{KillMode, KillRequest};
+
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.kill_confirm = Some(KillRequest {
+            mode: KillMode::Terminate,
+            pid: 12_345,
+            usename: "app".into(),
+            datname: "prod".into(),
+            state: "active".into(),
+            qtime_secs: Some(42.0),
+            query_summary: "update accounts set …".into(),
+        });
+        let buf = render_into(180, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(dump.contains("TERMINATE"), "verb missing: {dump}");
+        assert!(dump.contains("pid 12345"), "pid missing: {dump}");
+        assert!(dump.contains("[y/N]"), "confirm hint missing: {dump}");
+    }
+
+    #[test]
+    fn footer_shows_admin_message_briefly() {
+        use crate::top::state::{AdminMessage, AdminMessageLevel};
+        use std::time::Duration;
+
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.admin_message = Some(AdminMessage {
+            text: "CANCEL pid 12345: ok".into(),
+            level: AdminMessageLevel::Ok,
+            expires_at: std::time::Instant::now() + Duration::from_secs(5),
+        });
+        let buf = render_into(160, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(dump.contains(" OK "), "OK badge missing: {dump}");
+        assert!(
+            dump.contains("CANCEL pid 12345: ok"),
+            "admin message missing: {dump}"
         );
     }
 

@@ -48,7 +48,20 @@ pub const SUMMARY_SQL: &str = r"
         (select coalesce(sum(deadlocks), 0)::int8 from pg_stat_database)
                                                                     as deadlocks_total,
         (select coalesce(sum(temp_files), 0)::int8 from pg_stat_database)
-                                                                    as temp_files_total
+                                                                    as temp_files_total,
+        coalesce(
+            sum(case when backend_type = 'autovacuum worker' then 1 else 0 end),
+            0
+        )::int                                                      as autovacuum_busy,
+        current_setting('autovacuum_max_workers')::int              as autovacuum_max,
+        (select coalesce(count(*), 0)::int from pg_replication_slots
+            where slot_type = 'physical')                           as phys_slots,
+        (select coalesce(count(*) filter (where active), 0)::int
+            from pg_replication_slots where slot_type = 'physical') as phys_slots_active,
+        (select coalesce(count(*), 0)::int from pg_replication_slots
+            where slot_type = 'logical')                            as log_slots,
+        (select coalesce(count(*) filter (where active), 0)::int
+            from pg_replication_slots where slot_type = 'logical')  as log_slots_active
     from pg_stat_activity
     where pid <> pg_backend_pid()
 ";
@@ -118,6 +131,12 @@ mod tests {
             "longest_active_query_secs",
             "deadlocks_total",
             "temp_files_total",
+            "autovacuum_busy",
+            "autovacuum_max",
+            "phys_slots",
+            "phys_slots_active",
+            "log_slots",
+            "log_slots_active",
         ] {
             assert!(
                 SUMMARY_SQL.contains(col),

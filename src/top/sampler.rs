@@ -77,6 +77,18 @@ async fn query_summary(client: &Client, timeout_ms: u64) -> anyhow::Result<Optio
         longest_active_query_secs: row.try_get::<_, Option<f64>>(11)?.unwrap_or(0.0).max(0.0),
         deadlocks_total: row.try_get::<_, Option<i64>>(12)?.unwrap_or(0),
         temp_files_total: row.try_get::<_, Option<i64>>(13)?.unwrap_or(0),
+        #[allow(clippy::cast_sign_loss)]
+        autovacuum_busy: row.get::<_, i32>(14).max(0) as u32,
+        #[allow(clippy::cast_sign_loss)]
+        autovacuum_max: row.get::<_, i32>(15).max(0) as u32,
+        #[allow(clippy::cast_sign_loss)]
+        phys_slots: row.get::<_, i32>(16).max(0) as u32,
+        #[allow(clippy::cast_sign_loss)]
+        phys_slots_active: row.get::<_, i32>(17).max(0) as u32,
+        #[allow(clippy::cast_sign_loss)]
+        log_slots: row.get::<_, i32>(18).max(0) as u32,
+        #[allow(clippy::cast_sign_loss)]
+        log_slots_active: row.get::<_, i32>(19).max(0) as u32,
     }))
 }
 

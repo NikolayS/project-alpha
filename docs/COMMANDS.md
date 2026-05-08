@@ -46,7 +46,7 @@ These match psql behaviour and must not be changed:
 |---|---|
 | `/dba [subcommand]` | database diagnostics (activity, locks, bloat, etc.) |
 | `/ash [args]` | active session history (requires pg_ash extension) |
-| `/top [flags]` | live TUI monitor — top-like view of `pg_stat_activity`. Flags: `--once` (one snapshot), `--batch` / `-b` (continuous text log), `--refresh <n>` / `-s <n>` (interval, 0.1–60 s), `--ts-format <fmt>` (strftime prefix used by `--batch`, default `%Y-%m-%dT%H:%M:%SZ`) |
+| `/top [flags]` | live TUI monitor — top-like view of `pg_stat_activity`. Flags: `--once` (one snapshot), `--batch` / `-b` (continuous text log), `--refresh <n>` / `-s <n>` (interval, 0.1–60 s), `--ts-format <fmt>` (strftime prefix used by `--batch`, default `%Y-%m-%dT%H:%M:%SZ`). Interactive keys: `↑/↓` move cursor · `Space` immediate refresh · `←/→` (or `<`/`>`) cycle sort column · `r` reverse direction · `e` extended columns · `s` set refresh delay · `k`/`K` cancel/terminate selected backend (`y/N` confirm) · `q`/`Esc` quit. Run interactive `/top` and parallel `/top --batch > /tmp/top.log` from two rpg sessions for live-view + log-to-file. |
 
 ### Input/execution modes
 

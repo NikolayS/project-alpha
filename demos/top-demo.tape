@@ -67,24 +67,24 @@ Sleep 2s
 PageUp
 Sleep 1800ms
 
-# --- Cycle sort columns with > / < and reverse with r. The active
+# --- Cycle sort columns with → / ← (or </>); reverse with r. The active
 # --- column header carries ▼ (desc) / ▲ (asc). Arrow follows each press. ---
-Type ">"
+Right
 Sleep 2500ms
-Type ">"
+Right
 Sleep 2500ms
-Type ">"
+Right
 Sleep 2500ms
 Type "r"
 Sleep 2500ms
-Type "<"
+Left
 Sleep 2500ms
-Type "<"
+Left
 Sleep 2500ms
 
 # --- Toggle extended columns: app, client, backend appear ---
 Type "e"
-Sleep 4s
+Sleep 3500ms
 
 # --- Collapse back to default columns ---
 Type "e"
@@ -98,9 +98,28 @@ Backspace
 Backspace
 Backspace
 Type "0.5"
-Sleep 1200ms
+Sleep 1500ms
 Enter
-Sleep 5s
+Sleep 4s
+
+# --- Pick a row and ask to cancel it. The footer flips to a CANCEL
+# --- confirmation showing pid / user@db / state / qtime / query summary;
+# --- y fires, n cancels. We press n to keep the demo idempotent. ---
+Down
+Sleep 800ms
+Down
+Sleep 800ms
+Type "k"
+Sleep 3500ms
+Type "n"
+Sleep 1500ms
+
+# --- Same flow with Shift-K (TERMINATE — heavier weapon, separate verb
+# --- in the footer). Press n again to dismiss without firing. ---
+Type "K"
+Sleep 3500ms
+Type "n"
+Sleep 1500ms
 
 # --- Quit /top with q ---
 Type "q"

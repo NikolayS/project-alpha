@@ -37,7 +37,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio_postgres::Client;
 
 use sampler::TickResult;
-use state::App;
+use state::{AdminMessage, AdminMessageLevel, App, KillRequest};
 use theme::Theme;
 
 use crate::repl::ReplSettings;
@@ -161,6 +161,13 @@ pub async fn run_top(
     let mut terminal = Terminal::new(backend)?;
 
     'outer: loop {
+        // 0. Execute any pending kill before the next tick so its outcome
+        //    is visible immediately in the refreshed snapshot.
+        if let Some(req) = app.kill_pending.take() {
+            let msg = run_kill(client, &req).await;
+            app.admin_message = Some(msg);
+        }
+
         // 1. Sampler tick.
         app.force_refresh = false;
         match sampler::tick(client, SAMPLE_TIMEOUT_MS).await {
@@ -277,6 +284,53 @@ async fn run_batch(client: &Client, args: &TopArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Execute an approved `pg_cancel_backend` / `pg_terminate_backend` and
+/// return a footer-friendly result message. A short `statement_timeout`
+/// is applied for the call itself so a hostile lock can't wedge the TUI.
+async fn run_kill(client: &Client, req: &KillRequest) -> AdminMessage {
+    use std::time::Duration;
+
+    let sql = format!("select {}($1)", req.pg_function_for_request());
+    // Best-effort guard. Failures here are non-fatal: the kill SQL still
+    // runs at the regular timeout.
+    let _ = client.execute("set statement_timeout = '5s'", &[]).await;
+    let result = client.query_one(&sql, &[&req.pid]).await;
+    let _ = client.execute("set statement_timeout = 0", &[]).await;
+
+    let ttl = Instant::now() + Duration::from_secs(5);
+    match result {
+        Ok(row) => {
+            let ok: bool = row
+                .try_get::<_, Option<bool>>(0)
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            if ok {
+                AdminMessage {
+                    text: format!("{} pid {}: ok", req.mode.verb_upper(), req.pid),
+                    level: AdminMessageLevel::Ok,
+                    expires_at: ttl,
+                }
+            } else {
+                AdminMessage {
+                    text: format!(
+                        "{} pid {}: returned false (pid not found or not signal-able)",
+                        req.mode.verb_upper(),
+                        req.pid
+                    ),
+                    level: AdminMessageLevel::Err,
+                    expires_at: ttl,
+                }
+            }
+        }
+        Err(e) => AdminMessage {
+            text: format!("{} pid {}: {e}", req.mode.verb_upper(), req.pid),
+            level: AdminMessageLevel::Err,
+            expires_at: ttl,
+        },
+    }
 }
 
 async fn sample_into_app(client: &Client, app: &mut App) {

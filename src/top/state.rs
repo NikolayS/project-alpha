@@ -6,14 +6,20 @@
 //!
 //! S1 keys handled by [`App::handle_key`]:
 //!   - `q`, `Esc`, `Ctrl-C`         → exit (Esc cancels an open prompt first)
-//!   - `Up` / `k`, `Down` / `j`     → move row cursor (sticky-header scroll)
+//!   - `Up` / `Down`                → move row cursor (sticky-header scroll)
 //!   - `PageUp` / `PageDown`        → jump cursor by page
 //!   - `Home` / `End`               → first / last row
-//!   - `s`                          → set refresh delay (prompt 0.1–60 s)
+//!   - `Space`                      → force an immediate sampler tick
+//!   - `←` / `→` (also `<` / `>`)   → cycle active sort column
+//!   - `r`                          → reverse sort direction
 //!   - `e`                          → toggle extended columns (app/client/backend)
+//!   - `s`                          → set refresh delay (prompt 0.1–60 s)
+//!   - `k` / `K`                    → cancel / terminate selected backend
+//!                                    (opens a footer y/N confirm prompt)
 //!
 //! When a prompt is open, every other key feeds it (digits, `.`, Backspace,
-//! Enter to apply, Esc to cancel).
+//! Enter to apply, Esc to cancel). When the kill confirm is open, `y`/`Y`
+//! fires; anything else cancels.
 
 use std::time::{Duration, Instant};
 
@@ -74,6 +80,16 @@ pub struct ServerSummary {
     pub deadlocks_total: i64,
     /// Cumulative temp file count across every database in the cluster.
     pub temp_files_total: i64,
+    /// Number of backends with `backend_type = 'autovacuum worker'`.
+    pub autovacuum_busy: u32,
+    /// `current_setting('autovacuum_max_workers')` — slot ceiling.
+    pub autovacuum_max: u32,
+    /// Physical replication slot counts (active out of total).
+    pub phys_slots: u32,
+    pub phys_slots_active: u32,
+    /// Logical replication slot counts.
+    pub log_slots: u32,
+    pub log_slots_active: u32,
 }
 
 /// One sample tick of data; what the sampler produces and the renderer reads.
@@ -120,6 +136,71 @@ impl PromptKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Refresh => "delay (secs)",
+        }
+    }
+}
+
+/// Action requested via `k` (cancel) or `K` (terminate). Cancel sends
+/// `pg_cancel_backend` (signals the running query); Terminate sends
+/// `pg_terminate_backend` (closes the connection — heavier weapon).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillMode {
+    Cancel,
+    Terminate,
+}
+
+impl KillMode {
+    pub const fn verb_upper(self) -> &'static str {
+        match self {
+            Self::Cancel => "CANCEL",
+            Self::Terminate => "TERMINATE",
+        }
+    }
+
+    pub const fn pg_function(self) -> &'static str {
+        match self {
+            Self::Cancel => "pg_cancel_backend",
+            Self::Terminate => "pg_terminate_backend",
+        }
+    }
+}
+
+/// Snapshot of an [`ActivityRow`] taken at the moment `k`/`K` was pressed.
+/// Carrying the row data through the confirmation cycle means the prompt
+/// describes the exact backend the user clicked on, even if the table
+/// re-sorts under them between the keystroke and the `y` confirmation.
+#[derive(Debug, Clone)]
+pub struct KillRequest {
+    pub mode: KillMode,
+    pub pid: i32,
+    pub usename: String,
+    pub datname: String,
+    pub state: String,
+    pub qtime_secs: Option<f64>,
+    pub query_summary: String,
+}
+
+impl KillRequest {
+    /// Convenience: forward the mode's PG function name so callers
+    /// can build the SQL without re-matching on `KillMode`.
+    pub const fn pg_function_for_request(&self) -> &'static str {
+        self.mode.pg_function()
+    }
+
+    fn from_row(mode: KillMode, row: &ActivityRow) -> Self {
+        let mut summary: String = row.query.split_whitespace().collect::<Vec<_>>().join(" ");
+        if summary.chars().count() > 60 {
+            summary = summary.chars().take(59).collect::<String>();
+            summary.push('…');
+        }
+        Self {
+            mode,
+            pid: row.pid,
+            usename: row.usename.clone(),
+            datname: row.datname.clone(),
+            state: row.state.clone(),
+            qtime_secs: row.qtime_secs,
+            query_summary: summary,
         }
     }
 }
@@ -268,6 +349,30 @@ pub struct App {
     /// window and run a sampler tick immediately (matches `top`'s
     /// space-bar behaviour). Cleared by the loop after the forced tick.
     pub force_refresh: bool,
+    /// Pending `k`/`K` confirmation. While `Some`, the footer shows a
+    /// y/n prompt instead of the default hint line.
+    pub kill_confirm: Option<KillRequest>,
+    /// Approved kill that the event loop will execute on its next pass.
+    /// Cleared after the SQL is dispatched. Separate from `kill_confirm`
+    /// so `handle_key` (sync, no I/O) can hand the action off to the loop.
+    pub kill_pending: Option<KillRequest>,
+    /// Last admin-action result, surfaced briefly in the footer until
+    /// the next sampler tick (or 5 s, whichever is sooner).
+    pub admin_message: Option<AdminMessage>,
+}
+
+/// Result of a kill action, surfaced in the footer.
+#[derive(Debug, Clone)]
+pub struct AdminMessage {
+    pub text: String,
+    pub level: AdminMessageLevel,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminMessageLevel {
+    Ok,
+    Err,
 }
 
 impl Default for App {
@@ -286,6 +391,9 @@ impl Default for App {
             sort_desc: true,
             last_key: None,
             force_refresh: false,
+            kill_confirm: None,
+            kill_pending: None,
+            admin_message: None,
         }
     }
 }
@@ -386,6 +494,12 @@ impl App {
             return self.should_exit;
         }
 
+        // Kill confirmation: only y / Y fire, anything else cancels.
+        if self.kill_confirm.is_some() {
+            self.handle_kill_confirm_key(key);
+            return self.should_exit;
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -394,21 +508,51 @@ impl App {
             KeyCode::Char('c') if ctrl => {
                 self.should_exit = true;
             }
-            KeyCode::Up | KeyCode::Char('k') => self.cursor_up(1),
-            KeyCode::Down | KeyCode::Char('j') => self.cursor_down(1),
+            KeyCode::Up => self.cursor_up(1),
+            KeyCode::Down => self.cursor_down(1),
             KeyCode::PageUp => self.cursor_up(page_size.max(1)),
             KeyCode::PageDown => self.cursor_down(page_size.max(1)),
             KeyCode::Home => self.cursor_home(),
             KeyCode::End => self.cursor_end(),
+            // Vim-style cursor; intentionally no `j` because `k` is the
+            // pg_cancel_backend trigger and a Vim user would expect both
+            // letters bound together. Down arrow + j-disabled is the
+            // safer call.
             KeyCode::Char('s') => self.open_refresh_prompt(),
             KeyCode::Char('e') => self.extended = !self.extended,
-            KeyCode::Char('<' | ',') => self.cycle_sort(-1),
-            KeyCode::Char('>' | '.') => self.cycle_sort(1),
+            KeyCode::Char('<' | ',') | KeyCode::Left => self.cycle_sort(-1),
+            KeyCode::Char('>' | '.') | KeyCode::Right => self.cycle_sort(1),
             KeyCode::Char('r') => self.sort_desc = !self.sort_desc,
             KeyCode::Char(' ') => self.force_refresh = true,
+            KeyCode::Char('k') => self.request_kill(KillMode::Cancel),
+            KeyCode::Char('K') => self.request_kill(KillMode::Terminate),
             _ => {}
         }
         self.should_exit
+    }
+
+    fn handle_kill_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                self.kill_pending = self.kill_confirm.take();
+            }
+            // n / N / Esc / anything else → cancel without firing.
+            _ => self.kill_confirm = None,
+        }
+    }
+
+    fn request_kill(&mut self, mode: KillMode) {
+        let Some(snap) = self.snapshot.as_ref() else {
+            return;
+        };
+        let Some(row) = snap.rows.get(self.selected_row) else {
+            return;
+        };
+        // Don't try to kill background workers / non-client backends.
+        if row.pid <= 0 {
+            return;
+        }
+        self.kill_confirm = Some(KillRequest::from_row(mode, row));
     }
 
     /// Cycle the active sort column by `delta` positions (left = -1,
@@ -704,14 +848,20 @@ mod tests {
     }
 
     #[test]
-    fn vim_style_j_k_move_cursor() {
+    fn k_no_longer_aliases_cursor_up() {
+        // `k` is now the cancel-backend trigger (matches top), no longer
+        // a vim-style cursor movement. Make sure the binding swap really
+        // happened so future refactors don't quietly bring vim-`k` back
+        // and then surprise an operator with an accidental cancellation.
         let mut app = App::new();
         app.set_snapshot(snap_with(3));
-        app.handle_key(key(KeyCode::Char('j')), 10);
-        app.handle_key(key(KeyCode::Char('j')), 10);
+        app.handle_key(key(KeyCode::Down), 10);
+        app.handle_key(key(KeyCode::Down), 10);
         assert_eq!(app.selected_row, 2);
         app.handle_key(key(KeyCode::Char('k')), 10);
-        assert_eq!(app.selected_row, 1);
+        // Cursor unchanged; `k` opened a confirm prompt instead.
+        assert_eq!(app.selected_row, 2);
+        assert!(app.kill_confirm.is_some());
     }
 
     #[test]
@@ -892,6 +1042,109 @@ mod tests {
         app.handle_key(key(KeyCode::Char('r')), 10);
         assert_eq!(app.sort_column, col);
         assert_eq!(app.sort_desc, !was_desc);
+    }
+
+    // -- Kill confirmation ---------------------------------------------------
+
+    fn snap_with_pid(pid: i32, query: &str) -> Snapshot {
+        Snapshot {
+            ts: 1,
+            server: ServerSummary::default(),
+            rows: vec![ActivityRow {
+                pid,
+                usename: "nik".into(),
+                datname: "prod".into(),
+                state: "active".into(),
+                query: query.into(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn k_opens_cancel_confirmation_with_selected_row_data() {
+        let mut app = App::new();
+        app.set_snapshot(snap_with_pid(1234, "select pg_sleep(60)"));
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        let req = app.kill_confirm.as_ref().expect("k opens confirm");
+        assert_eq!(req.mode, KillMode::Cancel);
+        assert_eq!(req.pid, 1234);
+        assert_eq!(req.usename, "nik");
+        assert!(req.query_summary.starts_with("select pg_sleep"));
+    }
+
+    #[test]
+    fn shift_k_opens_terminate_confirmation() {
+        let mut app = App::new();
+        app.set_snapshot(snap_with_pid(1234, "select 1"));
+        app.handle_key(key(KeyCode::Char('K')), 10);
+        let req = app.kill_confirm.as_ref().expect("K opens confirm");
+        assert_eq!(req.mode, KillMode::Terminate);
+    }
+
+    #[test]
+    fn k_is_a_no_op_with_no_rows() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        assert!(app.kill_confirm.is_none());
+    }
+
+    #[test]
+    fn k_is_a_no_op_for_zero_pid_rows() {
+        // Background workers (checkpointer, autovacuum launcher, …) come
+        // back from pg_stat_activity with pid 0 in our fixture model. The
+        // confirm prompt must reject them rather than firing pg_cancel
+        // on pid 0.
+        let mut app = App::new();
+        let mut snap = snap_with_pid(0, "(no query)");
+        snap.rows[0].state.clear();
+        app.set_snapshot(snap);
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        assert!(app.kill_confirm.is_none());
+    }
+
+    #[test]
+    fn y_promotes_confirm_to_pending() {
+        let mut app = App::new();
+        app.set_snapshot(snap_with_pid(1234, "select 1"));
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        assert!(app.kill_confirm.is_some());
+
+        app.handle_key(key(KeyCode::Char('y')), 10);
+        assert!(app.kill_confirm.is_none(), "confirm consumed");
+        let pending = app.kill_pending.as_ref().expect("pending set");
+        assert_eq!(pending.pid, 1234);
+        assert_eq!(pending.mode, KillMode::Cancel);
+    }
+
+    #[test]
+    fn n_and_esc_cancel_kill_confirmation_without_firing() {
+        for cancel_key in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+            let mut app = App::new();
+            app.set_snapshot(snap_with_pid(1234, "select 1"));
+            app.handle_key(key(KeyCode::Char('K')), 10);
+            assert!(app.kill_confirm.is_some());
+            app.handle_key(key(cancel_key), 10);
+            assert!(app.kill_confirm.is_none());
+            assert!(app.kill_pending.is_none());
+            assert!(
+                !app.should_exit,
+                "Esc must not exit while kill prompt is open"
+            );
+        }
+    }
+
+    #[test]
+    fn left_right_arrows_cycle_sort_column() {
+        let mut app = App::new();
+        let start = app.sort_column;
+        app.handle_key(key(KeyCode::Right), 10);
+        assert_ne!(app.sort_column, start);
+        let after_right = app.sort_column;
+        app.handle_key(key(KeyCode::Left), 10);
+        assert_eq!(app.sort_column, start, "Left should rewind Right");
+        app.handle_key(key(KeyCode::Left), 10);
+        assert_ne!(app.sort_column, after_right);
     }
 
     #[test]
