@@ -23,8 +23,9 @@ Enter
 Sleep 500ms
 Show
 
-# --- Connect ---
-Type "rpg"
+# --- Connect with global --show-keys (turns on the on-screen
+# --- "key pressed" overlay for every TUI command in this rpg session). ---
+Type "rpg --show-keys"
 Sleep 1500ms
 Enter
 Sleep 3s
@@ -40,7 +41,7 @@ Sleep 3s
 #     IdleTx light yellow, …) and uses ':' as the Type:Event delimiter
 #   • qtime warn (>1 s yellow) / crit (>30 s red)
 #   • sticky table header — rows scroll, header stays
-Type "/top --show-keys"
+Type "/top"
 Sleep 1500ms
 Enter
 Sleep 6s

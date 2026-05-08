@@ -536,7 +536,12 @@ pub(super) async fn dispatch_ai_command(
         {
             use std::io::IsTerminal;
             let raw_args = input.strip_prefix("/top").map_or("", str::trim);
-            let top_args = crate::top::TopArgs::parse(raw_args);
+            let mut top_args = crate::top::TopArgs::parse(raw_args);
+            // The global `--show-keys` flag wins over the per-/top arg —
+            // either source can enable the recording overlay.
+            if settings.show_keys {
+                top_args.show_keys = true;
+            }
             let headless = top_args.once || top_args.batch;
             if !headless && !std::io::stdout().is_terminal() {
                 rpg_eprintln!(

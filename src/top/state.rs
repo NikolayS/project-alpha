@@ -733,30 +733,51 @@ pub fn format_strftime(fmt: &str, unix_secs: i64) -> String {
 }
 
 /// Compact human label for a key press, used by the corner overlay.
-/// Uses arrow glyphs for cursor keys and named labels for
-/// non-printable special keys; printable characters render as themselves
-/// (with `Ctrl-` prefix when modified).
+///
+/// Modifier handling:
+///   - `Shift` is mostly implicit: typing 'K' already arrives as
+///     `Char('K')` with the SHIFT modifier set, so we don't add a
+///     visible "⇧" prefix for the common case. Exception: `BackTab`
+///     (Shift-Tab) gets an explicit "⇧Tab" label since the key code
+///     itself encodes the modifier.
+///   - `Ctrl` / `Alt` / `Super` (Meta on macOS / Windows key) are
+///     prepended in `top`-style abbreviations: `C-`, `M-`, `S-`. They
+///     stack: `Ctrl-Alt-X` renders as `C-M-X`.
+///   - Crossterm exposes the modifier on most terminals; macOS
+///     terminals routinely strip Alt/Super, so those badges won't
+///     fire there — that's a terminal limitation, not ours.
 pub fn format_key_label(key: &KeyEvent) -> String {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Up => "↑".into(),
-        KeyCode::Down => "↓".into(),
-        KeyCode::Left => "←".into(),
-        KeyCode::Right => "→".into(),
-        KeyCode::PageUp => "PgUp".into(),
-        KeyCode::PageDown => "PgDn".into(),
-        KeyCode::Home => "Home".into(),
-        KeyCode::End => "End".into(),
-        KeyCode::Tab => "Tab".into(),
-        KeyCode::BackTab => "⇧Tab".into(),
-        KeyCode::Enter => "↩".into(),
-        KeyCode::Esc => "Esc".into(),
-        KeyCode::Backspace => "⌫".into(),
-        KeyCode::Delete => "⌦".into(),
-        KeyCode::Char(c) if ctrl => format!("C-{c}"),
-        KeyCode::Char(c) => c.to_string(),
-        _ => String::new(),
+    let mods = key.modifiers;
+    let mut prefix = String::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        prefix.push_str("C-");
     }
+    if mods.contains(KeyModifiers::ALT) {
+        prefix.push_str("M-");
+    }
+    if mods.contains(KeyModifiers::SUPER) {
+        prefix.push_str("S-");
+    }
+
+    let body = match key.code {
+        KeyCode::Up => "↑".to_owned(),
+        KeyCode::Down => "↓".to_owned(),
+        KeyCode::Left => "←".to_owned(),
+        KeyCode::Right => "→".to_owned(),
+        KeyCode::PageUp => "PgUp".to_owned(),
+        KeyCode::PageDown => "PgDn".to_owned(),
+        KeyCode::Home => "Home".to_owned(),
+        KeyCode::End => "End".to_owned(),
+        KeyCode::Tab => "Tab".to_owned(),
+        KeyCode::BackTab => "⇧Tab".to_owned(),
+        KeyCode::Enter => "↩".to_owned(),
+        KeyCode::Esc => "Esc".to_owned(),
+        KeyCode::Backspace => "⌫".to_owned(),
+        KeyCode::Delete => "⌦".to_owned(),
+        KeyCode::Char(c) => c.to_string(),
+        _ => return String::new(),
+    };
+    format!("{prefix}{body}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,6 +1231,39 @@ mod tests {
         // typed chars should not surface in the corner.
         app.handle_key(key(KeyCode::Char('5')), 10);
         assert!(app.fresh_key_overlay().is_none());
+    }
+
+    #[test]
+    fn modifier_keys_get_compact_prefixes() {
+        // C- (Ctrl), M- (Alt / Meta), S- (Super) — top-style.
+        let make = |code: KeyCode, mods: KeyModifiers| KeyEvent::new(code, mods);
+
+        assert_eq!(
+            format_key_label(&make(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            "C-c"
+        );
+        assert_eq!(
+            format_key_label(&make(KeyCode::Char('x'), KeyModifiers::ALT)),
+            "M-x"
+        );
+        assert_eq!(
+            format_key_label(&make(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            "C-M-k"
+        );
+        // Shift on a printable arrives as the uppercased char itself —
+        // we don't add an explicit shift prefix in that case.
+        assert_eq!(
+            format_key_label(&make(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+            "K"
+        );
+        // BackTab is the canonical Shift-Tab and gets an explicit ⇧Tab.
+        assert_eq!(
+            format_key_label(&make(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            "⇧Tab"
+        );
     }
 
     #[test]

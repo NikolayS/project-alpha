@@ -306,29 +306,45 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
         return;
     };
 
-    // 3-row solid-yellow billboard at the lower-left of the body. The
-    // height + padded label make the keystroke visually loud without
-    // per-character ASCII art. Yellow bg + bold-black fg pops on every
-    // theme we tested. (Plain spaces instead of half-blocks because some
-    // gif-rendering pipelines drop the ▀/▄ glyphs.)
-    let label = format!(" ⌨  {}  ", ko.label);
+    // 3-row billboard at the lower-left of the body. The label is
+    // upscaled to Unicode "fullwidth" (every glyph becomes 2 cells
+    // wide), which is the only way to actually double the visual size
+    // of the character inside a fixed-cell terminal — terminals can't
+    // change cell dimensions mid-frame.
+    //
+    // The "alpha" effect is simulated with a muted olive-yellow bg
+    // instead of pure Color::Yellow. Real alpha doesn't exist in the
+    // VT100 cell model; a dimmer hue reads as semi-transparent without
+    // erasing the underlying text outline. Bold-black fg keeps the
+    // label legible against the muted bg.
+    let upscaled = upscale_label(&ko.label);
+    let label = format!("  {upscaled}  ");
     let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    let inner_w = label_chars;
+    // Add per-cell width for fullwidth chars: each 0xFF01..0xFF5E or
+    // 0x3000 char prints across 2 cells, so we need an effective width.
+    let display_w = u16::try_from(visual_width(&label)).unwrap_or(u16::MAX);
+    let inner_w = display_w.max(label_chars);
     let box_h: u16 = 3;
     if body_area.width <= inner_w + 2 || body_area.height < box_h + 1 {
         return;
     }
 
-    // Lower-left corner with one cell of padding from the body edges.
-    let x = body_area.x + 1;
+    // Lower-right corner with one cell of padding from the body edges.
+    let x = body_area
+        .x
+        .saturating_add(body_area.width)
+        .saturating_sub(inner_w + 1);
     let y = body_area
         .y
         .saturating_add(body_area.height)
         .saturating_sub(box_h + 1);
     let area = Rect::new(x, y, inner_w, box_h);
 
+    // Muted olive-yellow ≈ 50 % alpha yellow over a dark terminal. On
+    // 256-color terminals we fall back to the named Yellow.
+    let bg = ratatui::style::Color::Rgb(0xA0, 0x80, 0x18);
     let fill = Style::default()
-        .bg(ratatui::style::Color::Yellow)
+        .bg(bg)
         .fg(ratatui::style::Color::Black)
         .add_modifier(Modifier::BOLD);
 
@@ -339,6 +355,36 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
         Line::from(Span::styled(blank, fill)),
     ];
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Translate ASCII-printable characters to their Unicode "fullwidth"
+/// equivalents (each becomes ~2 cells wide). Arrow keys swap to the
+/// chunkier triangular variants. Multi-byte glyphs that already display
+/// at full width pass through unchanged.
+fn upscale_label(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '↑' => '▲',
+            '↓' => '▼',
+            '←' => '◀',
+            '→' => '▶',
+            ' ' => '\u{3000}', // ideographic space (full-width)
+            '!'..='~' => char::from_u32(u32::from(c) - 0x21 + 0xFF01).unwrap_or(c),
+            other => other,
+        })
+        .collect()
+}
+
+/// Cell-width estimate. ASCII = 1 cell; fullwidth Latin / ideographic
+/// space / triangular arrows = 2 cells. Good enough for the small set
+/// of glyphs the overlay can produce.
+fn visual_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' | '\u{3000}' | '▲' | '▼' | '◀' | '▶' => 2,
+            _ => 1,
+        })
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -815,8 +861,27 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 10);
         let buf = render_into(140, 30, &app);
         let dump = buffer_to_string(&buf);
-        assert!(dump.contains("⌨"), "expected ⌨ overlay: {dump}");
-        assert!(dump.contains('↓'), "expected ↓ label in overlay: {dump}");
+        // Down arrow is upscaled to its chunky variant ▼ inside the
+        // banner. There must be no keyboard / "⌨" decoration anywhere
+        // around it (the user explicitly removed it).
+        assert!(dump.contains('▼'), "expected ▼ label in overlay: {dump}");
+        assert!(!dump.contains("⌨"), "no keyboard glyph in overlay: {dump}");
+    }
+
+    /// Returns true if any cell in the buffer is filled with the
+    /// overlay's bg color (RGB 0xA0,0x80,0x18). Used as a reliable
+    /// "is the overlay on screen?" check now that the label glyphs
+    /// (▼, fullwidth letters) can also appear elsewhere in the frame.
+    fn buffer_has_overlay_bg(buf: &ratatui::buffer::Buffer) -> bool {
+        let target = ratatui::style::Color::Rgb(0xA0, 0x80, 0x18);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].bg == target {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[test]
@@ -825,11 +890,14 @@ mod tests {
 
         let mut app = App::new();
         app.set_snapshot(fixture_snapshot());
-        // Default: no overlay even after a keypress.
+        // Default: no overlay bg color anywhere in the frame even
+        // after a keypress.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 10);
         let buf = render_into(140, 30, &app);
-        let dump = buffer_to_string(&buf);
-        assert!(!dump.contains("⌨"), "overlay must default to off: {dump}");
+        assert!(
+            !buffer_has_overlay_bg(&buf),
+            "overlay must default to off (no overlay-bg cell expected)"
+        );
     }
 
     #[test]
@@ -845,10 +913,9 @@ mod tests {
             .checked_sub(std::time::Duration::from_millis(1))
             .expect("clock has advanced past 1 ms since boot");
         let buf = render_into(140, 30, &app);
-        let dump = buffer_to_string(&buf);
         assert!(
-            !dump.contains("⌨"),
-            "expired overlay should not render: {dump}"
+            !buffer_has_overlay_bg(&buf),
+            "expired overlay should leave no overlay-bg cell behind"
         );
     }
 

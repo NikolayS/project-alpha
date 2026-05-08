@@ -1285,6 +1285,13 @@ pub struct ReplSettings {
     ///
     /// Set by `--no-highlight` CLI flag or `\set HIGHLIGHT off`.
     pub no_highlight: bool,
+    /// Show a temporary on-screen badge for every key press in TUI
+    /// commands. Off by default — turned on globally by the
+    /// `--show-keys` CLI flag. The intent is to record animated GIFs
+    /// / asciinema demos of arbitrary rpg commands with the keystroke
+    /// labelled on screen. Currently honored by `/top`; later sprints
+    /// extend it to `/ash` and the bare REPL prompt.
+    pub show_keys: bool,
     /// Disable schema-aware tab completion in the interactive REPL.
     ///
     /// Toggled by the F2 key or `\f2` metacommand.
@@ -1674,6 +1681,7 @@ impl Default for ReplSettings {
             pending_pset_opts: Vec::new(),
             named_statements: HashSet::new(),
             no_highlight: false,
+            show_keys: false,
             no_completion: false,
             // Pager is enabled by default in interactive mode.
             pager_enabled: true,

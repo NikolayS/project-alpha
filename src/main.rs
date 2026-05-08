@@ -344,6 +344,13 @@ struct Cli {
     #[arg(long)]
     no_highlight: bool,
 
+    /// Show a temporary on-screen badge for each key press. Off by
+    /// default. Useful when recording animated GIFs / asciinema demos
+    /// of any rpg TUI command — currently honored by `/top`; later
+    /// sprints will extend it to `/ash` and the bare REPL prompt.
+    #[arg(long = "show-keys")]
+    show_keys: bool,
+
     /// Enable text-to-SQL mode: translate natural language to SQL.
     #[arg(long)]
     text2sql: bool,
@@ -600,6 +607,7 @@ fn build_settings(
         quiet: cli.quiet,
         debug: cli.debug,
         no_highlight,
+        show_keys: cli.show_keys,
         pager_enabled,
         pager_command,
         pager_min_lines,
