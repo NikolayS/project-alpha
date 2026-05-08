@@ -337,10 +337,13 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
     };
 
     let (lines, inner_w) = if let Some(g) = big_glyph {
-        // 5×5 glyph + 3-cell horizontal padding either side. The five
-        // glyph rows fill the entire box height (5 rows), no top /
-        // bottom padding rows needed.
-        const SIDE_PAD: usize = 3;
+        // 5×5 glyph with one cell of padding on each side. The glyph
+        // fills the entire 5-row height; only horizontal padding gives
+        // it some breathing room from the box edge. Earlier versions
+        // tried 3 cells on each side and the result was a visually
+        // oversized box compared to the glyph it framed — feedback was
+        // "omg too big".
+        const SIDE_PAD: usize = 1;
         let inner_w_usize = super::keyfont::GLYPH_W + 2 * SIDE_PAD;
         let pad: String = " ".repeat(SIDE_PAD);
         let lines: Vec<Line> = g
