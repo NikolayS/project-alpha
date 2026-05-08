@@ -16,64 +16,75 @@ Enter
 Sleep 200ms
 Type "bash /Users/nik/github/rpg/demos/top-workload.sh &"
 Enter
-Sleep 2500ms
+Sleep 3s
 Type "clear"
 Enter
 Sleep 500ms
 Show
 
-# --- Connect ---
+# --- Connect: pause so the viewer can read the typed command ---
 Type "rpg"
-Sleep 400ms
+Sleep 1500ms
 Enter
-Sleep 2500ms
+Sleep 3s
 
-# --- Launch /top ---
+# --- Launch /top: pause before Enter, then watch the live TUI ---
+# Visible smart features appearing here (no overlay text in vhs):
+#   • header connection LED ●  (green = fresh sample, yellow = stale)
+#   • "@ HH:MM:SS UTC" clock format (not a raw unix epoch)
+#   • per-state coloring (idle-in-tx = yellow, active = bright green)
+#   • per-wait coloring (Lock = red, IO = blue, LWLock = light yellow)
+#   • qtime warn/crit thresholds (>1 s yellow, >30 s red)
+#   • app/client/backend columns auto-shown ≥120 cols (responsive layout)
 Type "/top"
+Sleep 1500ms
 Enter
-Sleep 5s
+Sleep 6s
 
-# --- Move cursor down through rows ---
+# --- Cursor navigation: sticks across row-count changes between ticks ---
 Down
-Sleep 600ms
+Sleep 700ms
 Down
-Sleep 600ms
+Sleep 700ms
 Down
-Sleep 600ms
+Sleep 700ms
 Down
-Sleep 600ms
+Sleep 700ms
 Down
 Sleep 1500ms
 
-# --- Watch live refresh: counts and waits change ---
+# --- Pause to let the viewer watch counts/waits change live ---
 Sleep 4s
 
-# --- Move back up to the top ---
+# --- Move back up; cursor clamps even if rows shrink mid-tick ---
 Up
-Sleep 400ms
+Sleep 500ms
 Up
-Sleep 400ms
+Sleep 500ms
 Up
-Sleep 400ms
+Sleep 500ms
 Up
-Sleep 400ms
+Sleep 500ms
 Up
 Sleep 1500ms
 
 # --- One more live refresh to show stable behaviour ---
 Sleep 3s
 
-# --- Quit /top ---
+# --- Quit /top with q (single-key, no Enter needed in TUI) ---
 Type "q"
-Sleep 1500ms
+Sleep 2s
 
-# --- Demonstrate the headless `--once` mode ---
+# --- Headless `--once` mode: scriptable / CI snapshot ---
+# Same renderer as the TUI, written as plain text to stdout.
 Type "/top --once"
+Sleep 1500ms
 Enter
-Sleep 4s
+Sleep 5s
 
 # --- Clean exit from rpg ---
 Type "\q"
+Sleep 1500ms
 Enter
 Sleep 1s
 
