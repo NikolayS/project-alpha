@@ -10,6 +10,7 @@ the [VHS](https://github.com/charmbracelet/vhs) tape files used to render them.
 | `gif3_t2s.gif` | `\t2s` text-to-SQL with confirmation, then `\yolo` auto-execute |
 | `gif4_pspg.gif` | Built-in pager → `\set PAGER pspg` → same query routed through pspg |
 | `gif5_lua.gif` | Custom Lua commands: `\commands`, `\slow_mean`, `\slow_total`, `\table_info` |
+| `top-demo.gif` | `/top` live TUI Postgres monitor — Activity view + cursor navigation + `/top --once` headless mode |
 
 ## Prerequisites
 
@@ -46,7 +47,14 @@ vhs demos/gif2_typo.tape
 vhs demos/gif3_t2s.tape
 vhs demos/gif4_pspg.tape
 vhs demos/gif5_lua.tape
+vhs demos/top-demo.tape          # /top — live TUI monitor (PR #837)
 ```
+
+The `/top` demo uses `demos/top-workload.sh` to spawn a steady stream of
+mixed backends (active queries, idle-in-tx, advisory-lock contention).
+The tape expects a local Postgres on `localhost:55433` as `postgres` —
+adjust the `PG{HOST,PORT,USER,DATABASE}` env block at the top of the
+tape and the `CONNINFO` argument of `top-workload.sh` for your setup.
 
 Or render all at once:
 
