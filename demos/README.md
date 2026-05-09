@@ -64,10 +64,16 @@ workload section and looks laggy; the ffmpeg pass costs ~3× file size
 gitignored. The tape passes `--show-keys` so each keystroke flashes on
 screen — drop the flag if you want a clean recording.
 
-Or render all at once:
+Or render all at once (the `top-demo` tape is skipped here because it
+needs the `render-top.sh` ffmpeg post-process — running plain `vhs` on
+it produces the laggy gif the script was written to fix):
 
 ```bash
-for tape in demos/*.tape; do vhs "$tape"; done
+for tape in demos/*.tape; do
+  [[ "$tape" == *top-demo.tape ]] && continue
+  vhs "$tape"
+done
+bash demos/render-top.sh
 ```
 
 ## Note on gif1 re-renders

@@ -14,7 +14,12 @@ IFS=$'\n\t'
 # not committed to the repo).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PALETTE="$(mktemp -t top-demo-palette.XXXXXX.png)"
+# Explicit ${TMPDIR}-rooted path: macOS BSD `mktemp -t prefix` does not
+# treat XXXXXX as a template — it appends a random suffix to the whole
+# string, so a request for `…palette.XXXXXX.png` ends in `.RANDOM` and
+# ffmpeg's image2 muxer can't infer the codec. PID-stamped path keeps
+# the .png extension intact and is safe under the trap-based cleanup.
+PALETTE="${TMPDIR:-/tmp}/top-demo-palette-$$.png"
 readonly REPO_ROOT
 readonly TAPE="${REPO_ROOT}/demos/top-demo.tape"
 readonly GIF="${REPO_ROOT}/demos/top-demo.gif"
