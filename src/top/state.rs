@@ -1139,6 +1139,15 @@ mod tests {
     }
 
     #[test]
+    fn k_is_a_no_op_for_negative_pid_rows() {
+        // Walsender slots can surface with pid < 0. Same guard applies.
+        let mut app = App::new();
+        app.set_snapshot(snap_with_pid(-1, "(no query)"));
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        assert!(app.kill_confirm.is_none());
+    }
+
+    #[test]
     fn y_promotes_confirm_to_pending() {
         let mut app = App::new();
         app.set_snapshot(snap_with_pid(1234, "select 1"));
@@ -1215,6 +1224,79 @@ mod tests {
             req.pid, 7777,
             "kill confirm must target the sorted-slice row at selected_row, \
              not snap.rows[selected_row]"
+        );
+    }
+
+    #[test]
+    fn k_targets_sorted_row_under_qtime_sort() {
+        // Same invariant as k_targets_the_sorted_row_not_the_sql_row but
+        // under Qtime-descending. Row with higher qtime must be targeted.
+        let mut app = App::new();
+        let snap = Snapshot {
+            ts: 1,
+            server: ServerSummary::default(),
+            rows: vec![
+                ActivityRow {
+                    pid: 100,
+                    usename: "a".into(),
+                    datname: "d".into(),
+                    state: "active".into(),
+                    qtime_secs: Some(1.0),
+                    ..Default::default()
+                },
+                ActivityRow {
+                    pid: 999,
+                    usename: "b".into(),
+                    datname: "d".into(),
+                    state: "active".into(),
+                    qtime_secs: Some(60.0),
+                    ..Default::default()
+                },
+            ],
+        };
+        app.set_snapshot(snap);
+        app.sort_column = SortColumn::Qtime;
+        app.sort_desc = true; // sorted: [999 (60s), 100 (1s)]
+        app.selected_row = 0; // cursor on the 60s row → pid 999
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        let req = app.kill_confirm.as_ref().expect("k must open confirm");
+        assert_eq!(req.pid, 999, "cursor must target Qtime-sorted row");
+    }
+
+    #[test]
+    fn page_down_saturates_at_last_row() {
+        // PageDown with page_size > row_count must clamp at the last row,
+        // not wrap or panic.
+        let mut app = App::new();
+        app.set_snapshot(snap_with(3)); // 3 rows
+        app.handle_key(key(KeyCode::PageDown), 10); // page_size 10 > 3 rows
+        assert_eq!(
+            app.selected_row, 2,
+            "PageDown past end must saturate at last row"
+        );
+    }
+
+    #[test]
+    fn sort_right_edge_wraps_from_query_to_pid() {
+        let mut app = App::new();
+        app.sort_column = SortColumn::Query; // last column
+        app.handle_key(key(KeyCode::Char('>')), 10);
+        assert_eq!(
+            app.sort_column,
+            SortColumn::Pid,
+            "> from last column must wrap to first"
+        );
+    }
+
+    #[test]
+    fn set_snapshot_clears_last_error() {
+        let mut app = App::new();
+        app.note_error("connection lost".into());
+        assert!(app.last_error.is_some());
+        app.set_snapshot(snap_with(1));
+        assert!(
+            app.last_error.is_none(),
+            "set_snapshot must clear last_error"
         );
     }
 

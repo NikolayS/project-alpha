@@ -289,7 +289,7 @@ pub(in crate::top) fn scrub_terminal_unsafe(s: &str) -> String {
         .collect()
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(in crate::top) fn truncate(s: &str, max: usize) -> String {
     let s = scrub_terminal_unsafe(s);
     if s.chars().count() <= max {
         s
@@ -305,7 +305,7 @@ fn squash_query(s: &str) -> String {
     collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn format_secs(v: Option<f64>) -> String {
+pub(in crate::top) fn format_secs(v: Option<f64>) -> String {
     match v {
         None => "-".to_owned(),
         Some(s) if s < 0.0 => "-".to_owned(),

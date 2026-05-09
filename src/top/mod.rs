@@ -241,9 +241,11 @@ const HEADLESS_HEIGHT: u16 = 30;
 /// off-screen buffer, write the cell contents to stdout as plain text, and
 /// exit. Used for scripting, CI smoke tests, and PR evidence capture.
 async fn run_once(client: &Client) -> anyhow::Result<()> {
+    use ratatui::backend::TestBackend;
     let mut app = App::new();
     sample_into_app(client, &mut app).await;
-    write_text_frame(&app, io::stdout().lock())?;
+    let mut terminal = Terminal::new(TestBackend::new(HEADLESS_WIDTH, HEADLESS_HEIGHT))?;
+    write_text_frame(&app, &mut terminal, io::stdout().lock())?;
     Ok(())
 }
 
@@ -273,6 +275,15 @@ async fn run_batch(client: &Client, args: &TopArgs) -> anyhow::Result<()> {
 
     let mut interrupt = std::pin::pin!(tokio::signal::ctrl_c());
 
+    // Build the headless terminal once and reuse across ticks. Each
+    // TestBackend::new allocates two double-buffered Cell grids
+    // (HEADLESS_WIDTH × HEADLESS_HEIGHT each); reconstructing them on
+    // every tick wastes ~8 kB of heap per second for no reason.
+    let mut terminal = {
+        use ratatui::backend::TestBackend;
+        Terminal::new(TestBackend::new(HEADLESS_WIDTH, HEADLESS_HEIGHT))?
+    };
+
     loop {
         let mut app = App::new();
         sample_into_app(client, &mut app).await;
@@ -280,7 +291,7 @@ async fn run_batch(client: &Client, args: &TopArgs) -> anyhow::Result<()> {
         let ts = format_strftime(&fmt, ts_secs);
         let mut out = io::stdout().lock();
         writeln!(out, "===== {ts} =====")?;
-        write_text_frame(&app, &mut out)?;
+        write_text_frame(&app, &mut terminal, &mut out)?;
         writeln!(out)?;
         out.flush()?;
         drop(out);
@@ -349,12 +360,12 @@ async fn sample_into_app(client: &Client, app: &mut App) {
     }
 }
 
-fn write_text_frame<W: Write>(app: &App, mut out: W) -> anyhow::Result<()> {
-    use ratatui::backend::TestBackend;
-
+fn write_text_frame<W: Write>(
+    app: &App,
+    terminal: &mut Terminal<ratatui::backend::TestBackend>,
+    mut out: W,
+) -> anyhow::Result<()> {
     let theme = Theme::for_once();
-    let backend = TestBackend::new(HEADLESS_WIDTH, HEADLESS_HEIGHT);
-    let mut terminal = Terminal::new(backend)?;
     terminal.draw(|f| renderer::draw(f, app, &theme))?;
     let buf = terminal.backend().buffer();
     for y in 0..buf.area.height {

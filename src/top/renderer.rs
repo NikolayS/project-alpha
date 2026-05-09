@@ -11,7 +11,7 @@ use super::state::{
     AdminMessage, AdminMessageLevel, App, KillRequest, PromptKind, PromptState, Snapshot, View,
 };
 use super::theme::Theme;
-use super::views::activity::{self, scrub_terminal_unsafe};
+use super::views::activity::{self, format_secs, scrub_terminal_unsafe, truncate};
 
 /// Min terminal size below which we render a "too small" stub instead of the
 /// real UI. 24 rows × 80 cols matches the project-wide minimum used by
@@ -92,7 +92,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         row0_split[1],
     );
     frame.render_widget(
-        Paragraph::new(build_counts_line(snap, app, theme)),
+        Paragraph::new(build_counts_line(snap, theme)),
         row1_split[0],
     );
     frame.render_widget(
@@ -107,9 +107,17 @@ fn build_ops_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> 
     if let Some(s) = snap {
         Line::from(vec![
             Span::styled("longest-tx ", theme.muted),
-            Span::raw(format_secs_or_dash(s.server.longest_xact_secs)),
+            Span::raw(format_secs(if s.server.longest_xact_secs > 0.0 {
+                Some(s.server.longest_xact_secs)
+            } else {
+                None
+            })),
             Span::styled("  longest-q ", theme.muted),
-            Span::raw(format_secs_or_dash(s.server.longest_active_query_secs)),
+            Span::raw(format_secs(if s.server.longest_active_query_secs > 0.0 {
+                Some(s.server.longest_active_query_secs)
+            } else {
+                None
+            })),
             Span::styled("  deadlocks ", theme.muted),
             Span::raw(s.server.deadlocks_total.to_string()),
             Span::styled("  temp-files ", theme.muted),
@@ -189,7 +197,7 @@ fn build_summary_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<
     }
 }
 
-fn build_counts_line<'a>(snap: Option<&'a Snapshot>, _app: &'a App, theme: &'a Theme) -> Line<'a> {
+fn build_counts_line<'a>(snap: Option<&'a Snapshot>, theme: &'a Theme) -> Line<'a> {
     if let Some(s) = snap {
         Line::from(vec![
             Span::styled("active ", theme.muted),
@@ -209,25 +217,6 @@ fn build_counts_line<'a>(snap: Option<&'a Snapshot>, _app: &'a App, theme: &'a T
             "active –  idle-in-tx –  wait –  total –",
             theme.muted,
         ))
-    }
-}
-
-/// Format a non-negative second count as a compact human string, or `"-"`
-/// when zero (which we treat as "no transaction / no active query").
-fn format_secs_or_dash(secs: f64) -> String {
-    if secs <= 0.0 {
-        return "-".to_owned();
-    }
-    if secs < 1.0 {
-        format!("{:.0}ms", secs * 1000.0)
-    } else if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else if secs < 3600.0 {
-        format!("{:.0}m", secs / 60.0)
-    } else if secs < 86_400.0 {
-        format!("{:.0}h", secs / 3600.0)
-    } else {
-        format!("{:.0}d", secs / 86_400.0)
     }
 }
 
@@ -424,7 +413,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     } else if let Some(err) = app.last_error.as_deref() {
         Line::from(vec![
             Span::styled(" error ", Style::default().fg(ratatui::style::Color::Red)),
-            Span::raw(truncate_err(err, area.width.saturating_sub(8) as usize)),
+            Span::raw(truncate(err, area.width.saturating_sub(8) as usize)),
         ])
     } else {
         build_default_footer(theme)
@@ -433,18 +422,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn build_kill_confirm_line<'a>(req: &'a KillRequest, theme: &'a Theme) -> Line<'a> {
-    let qtime = req.qtime_secs.map_or_else(
-        || "-".to_owned(),
-        |s| {
-            if s < 1.0 {
-                format!("{:.0}ms", s * 1000.0)
-            } else if s < 60.0 {
-                format!("{s:.1}s")
-            } else {
-                format!("{:.0}m", s / 60.0)
-            }
-        },
-    );
+    let qtime = format_secs(req.qtime_secs);
     Line::from(vec![
         Span::styled(
             format!(" {} ", req.mode.verb_upper()),
@@ -533,17 +511,6 @@ fn build_prompt_line<'a>(prompt: &'a PromptState, theme: &'a Theme) -> Line<'a> 
     ])
 }
 
-fn truncate_err(s: &str, max: usize) -> String {
-    let cleaned = scrub_terminal_unsafe(s);
-    if cleaned.chars().count() <= max {
-        cleaned
-    } else {
-        let mut out: String = cleaned.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Too-small stub
 // ---------------------------------------------------------------------------
@@ -606,7 +573,7 @@ mod tests {
                     qtime_secs: Some(42.0),
                     xtime_secs: Some(42.0),
                     query: "update accounts set balance = balance + 1 where id = 5".into(),
-                    locks_held: 4,
+                    locks_held: 47, // unambiguous: not in any pid or server-stat
                 },
                 ActivityRow {
                     pid: 12_346,
@@ -621,7 +588,7 @@ mod tests {
                     qtime_secs: Some(2.3),
                     xtime_secs: Some(1020.0),
                     query: "select count(*) from events where ts > now() - interval '1 day'".into(),
-                    locks_held: 2,
+                    locks_held: 0, // renders as "-"
                 },
                 ActivityRow {
                     pid: 12_350,
@@ -636,7 +603,7 @@ mod tests {
                     qtime_secs: Some(5.0),
                     xtime_secs: Some(125.0),
                     query: "begin".into(),
-                    locks_held: 7,
+                    locks_held: 83, // unambiguous: not in any pid or server-stat
                 },
             ],
         }
@@ -832,6 +799,33 @@ mod tests {
     }
 
     #[test]
+    fn expired_admin_message_falls_back_to_default_footer() {
+        use crate::top::state::{AdminMessage, AdminMessageLevel};
+
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.admin_message = Some(AdminMessage {
+            text: "CANCEL pid 12345: ok".into(),
+            level: AdminMessageLevel::Ok,
+            // expired: 1 second in the past
+            expires_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+        });
+        let buf = render_into(160, 30, &app);
+        let dump = buffer_to_string(&buf);
+        assert!(
+            !dump.contains("CANCEL pid 12345"),
+            "expired message must not be rendered: {dump}"
+        );
+        // Default footer should be visible instead.
+        assert!(
+            dump.contains('q'),
+            "default footer 'q' hint missing: {dump}"
+        );
+    }
+
+    #[test]
     fn footer_shows_refresh_prompt_when_open() {
         let mut app = App::new();
         app.set_snapshot(fixture_snapshot());
@@ -955,11 +949,22 @@ mod tests {
         app.set_snapshot(fixture_snapshot());
         let buf = render_into(140, 30, &app);
         let dump = buffer_to_string(&buf);
-        // Header row contains the column label.
         assert!(dump.contains("locks"), "locks header missing: {dump}");
-        // pid 12345 has 4 locks, pid 12350 has 7.
-        assert!(dump.contains('4'), "expected 4-locks count visible");
-        assert!(dump.contains('7'), "expected 7-locks count visible");
+        // Values chosen to be unambiguous: 47 and 83 do not appear in any
+        // pid, server-stat field, or other column in the fixture snapshot.
+        assert!(
+            dump.contains("47"),
+            "expected 47-locks count for pid 12345: {dump}"
+        );
+        assert!(
+            dump.contains("83"),
+            "expected 83-locks count for pid 12350: {dump}"
+        );
+        // pid 12346 has locks_held=0 which must render as "-" not "0".
+        // We can't search for bare '-' (appears in wait event), but we can
+        // confirm '0' does NOT appear in the locks column by proxy: if the
+        // zero row rendered as "0" it would appear between "47" and "83".
+        // The dash rendering is covered by format_locks unit tests.
     }
 
     /// End-to-end safety: a malicious `pg_stat_activity` row with an ANSI
