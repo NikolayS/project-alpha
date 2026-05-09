@@ -47,7 +47,7 @@ vhs demos/gif2_typo.tape
 vhs demos/gif3_t2s.tape
 vhs demos/gif4_pspg.tape
 vhs demos/gif5_lua.tape
-vhs demos/top-demo.tape          # /top — live TUI monitor (PR #837)
+bash demos/render-top.sh         # /top — live TUI monitor (PR #837)
 ```
 
 The `/top` demo uses `demos/top-workload.sh` to spawn a steady stream of
@@ -55,6 +55,14 @@ mixed backends (active queries, idle-in-tx, advisory-lock contention).
 The tape expects a local Postgres on `localhost:55433` as `postgres` —
 adjust the `PG{HOST,PORT,USER,DATABASE}` env block at the top of the
 tape and the `CONNINFO` argument of `top-workload.sh` for your setup.
+
+`render-top.sh` runs vhs to produce both `.gif` and `.mp4`, then re-encodes
+the gif from the mp4 through ffmpeg's palette pipeline (15 fps, bayer
+dither). The native vhs gif quantizer drops frames during the busy
+workload section and looks laggy; the ffmpeg pass costs ~3× file size
+(11 MiB vs 3 MiB) but plays smoothly. The intermediate `top-demo.mp4` is
+gitignored. The tape passes `--show-keys` so each keystroke flashes on
+screen — drop the flag if you want a clean recording.
 
 Or render all at once:
 

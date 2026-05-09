@@ -28,3 +28,6 @@ Thumbs.db
 # Debug
 *.dSYM/
 .claude/worktrees/
+
+# vhs intermediate output for `bash demos/render-top.sh`
+demos/top-demo.mp4

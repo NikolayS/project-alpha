@@ -1,4 +1,5 @@
 Output demos/top-demo.gif
+Output demos/top-demo.mp4
 Set FontSize 14
 Set Width 1400
 Set Height 800
@@ -6,6 +7,7 @@ Set Theme "Dracula"
 Set Shell "zsh"
 Set TypingSpeed 40ms
 Set PlaybackSpeed 1.0
+Set Framerate 30
 
 # --- Hidden setup: PATH + connection env + start workload + clear ---
 Hide
