@@ -309,9 +309,9 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// swap to chunky `▲▼◀▶` so they don't look anaemic next to
 /// multi-letter labels. Bright `Color::Yellow` lets terminals map it
 /// to their own theme palette.
-const KEY_OVERLAY_MIN_BOX_W: u16 = 14;
-const KEY_OVERLAY_PADDING: u16 = 10;
-const KEY_OVERLAY_BOX_H: u16 = 5;
+const KEY_OVERLAY_MIN_BOX_W: u16 = 8;
+const KEY_OVERLAY_PADDING: u16 = 4;
+const KEY_OVERLAY_BOX_H: u16 = 3;
 
 fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Theme) {
     let Some(ko) = app.fresh_key_overlay() else {
@@ -324,29 +324,24 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
         .add_modifier(Modifier::BOLD);
 
     let label = chunky_arrow(&ko.label);
-    let chars: Vec<char> = label.chars().collect();
 
-    // Single-character labels get a 5×5 block-letter glyph (rendered
-    // at ~5× normal cell size). Multi-character labels (`PgDn`, `Esc`,
-    // `Home`, …) and any single char without a hand-drawn glyph fall
-    // back to the centred plain-text rendering.
-    let big_glyph = if chars.len() == 1 {
-        super::keyfont::glyph(chars[0])
-    } else {
-        None
-    };
+    // Render via the 3×5 figlet font when every character of the label
+    // has a hand-drawn glyph. That covers single-char keys (`e`, `K`,
+    // `r`, `<`, …), arrows, *and* multi-char labels like `PgDn`, `Esc`,
+    // `Home` — they all get the same scale. Anything outside the
+    // alphabet (extended Unicode, e.g. `↩`/`⌫`) falls back to plain
+    // centred text.
+    let glyph_lines = super::keyfont::render_label(&label);
 
-    let (lines, inner_w) = if let Some(g) = big_glyph {
-        // 5×5 glyph with one cell of padding on each side. The glyph
-        // fills the entire 5-row height; only horizontal padding gives
-        // it some breathing room from the box edge. Earlier versions
-        // tried 3 cells on each side and the result was a visually
-        // oversized box compared to the glyph it framed — feedback was
-        // "omg too big".
+    let (lines, inner_w, box_h) = if let Some(rows) = glyph_lines {
+        // Glyph rows + 1 cell of padding on each side. The font's
+        // GLYPH_H rows fill the entire box height — no top / bottom
+        // padding.
         const SIDE_PAD: usize = 1;
-        let inner_w_usize = super::keyfont::GLYPH_W + 2 * SIDE_PAD;
+        let glyph_w = rows.first().map_or(0, |r| r.chars().count());
+        let inner_w_usize = glyph_w + 2 * SIDE_PAD;
         let pad: String = " ".repeat(SIDE_PAD);
-        let lines: Vec<Line> = g
+        let lines: Vec<Line> = rows
             .iter()
             .map(|row| {
                 let s = format!("{pad}{row}{pad}");
@@ -354,29 +349,27 @@ fn render_key_overlay(frame: &mut Frame, body_area: Rect, app: &App, _theme: &Th
             })
             .collect();
         let inner_w = u16::try_from(inner_w_usize).unwrap_or(u16::MAX);
-        (lines, inner_w)
+        let box_h = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+        (lines, inner_w, box_h)
     } else {
-        // Plain-text fallback: centre the label on the middle row of
-        // a 5-row blank yellow box.
-        let label_w = u16::try_from(chars.len()).unwrap_or(u16::MAX);
+        // Plain-text fallback for chars outside the figlet font.
+        // Centre the label on the middle row of a 3-row blank yellow box.
+        let label_w = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         let inner_w = (label_w + KEY_OVERLAY_PADDING).max(KEY_OVERLAY_MIN_BOX_W);
         let inner_w_usize = inner_w as usize;
-        let pad_total = inner_w_usize.saturating_sub(chars.len());
+        let pad_total = inner_w_usize.saturating_sub(label.chars().count());
         let pad_left = pad_total / 2;
         let pad_right = pad_total - pad_left;
         let middle = format!("{}{}{}", " ".repeat(pad_left), label, " ".repeat(pad_right));
         let blank: String = " ".repeat(inner_w_usize);
         let lines = vec![
             Line::from(Span::styled(blank.clone(), fill)),
-            Line::from(Span::styled(blank.clone(), fill)),
             Line::from(Span::styled(middle, fill)),
-            Line::from(Span::styled(blank.clone(), fill)),
             Line::from(Span::styled(blank, fill)),
         ];
-        (lines, inner_w)
+        (lines, inner_w, KEY_OVERLAY_BOX_H)
     };
 
-    let box_h: u16 = KEY_OVERLAY_BOX_H;
     if body_area.width <= inner_w + 2 || body_area.height < box_h + 1 {
         return;
     }
