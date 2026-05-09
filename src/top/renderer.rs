@@ -452,9 +452,19 @@ fn build_kill_confirm_line<'a>(req: &'a KillRequest, theme: &'a Theme) -> Line<'
                 .bg(ratatui::style::Color::Red)
                 .add_modifier(Modifier::BOLD),
         ),
+        // Scrub each Postgres-supplied field separately. A DB user
+        // controlling `application_name` / `usename` could otherwise
+        // smuggle ANSI/BEL bytes into the operator's terminal at the
+        // moment they press `k` / `K` on that backend. The activity
+        // table scrubs via `truncate` / `squash_query`; this confirm
+        // line takes the same precaution. (REV round-11 finding.)
         Span::raw(format!(
             " pid {} ({}@{}, {} {qtime}, ‹{}›)?  ",
-            req.pid, req.usename, req.datname, req.state, req.query_summary,
+            req.pid,
+            scrub_terminal_unsafe(&req.usename),
+            scrub_terminal_unsafe(&req.datname),
+            scrub_terminal_unsafe(&req.state),
+            scrub_terminal_unsafe(&req.query_summary),
         )),
         Span::styled("[y/N]", theme.title),
     ])
@@ -480,10 +490,13 @@ fn build_admin_message_line<'a>(msg: &'a AdminMessage, theme: &'a Theme) -> Line
         AdminMessageLevel::Ok => " OK ",
         AdminMessageLevel::Err => " ERR ",
     };
+    // `msg.text` in the kill error branch is `format!("{e}")` from
+    // `tokio_postgres::Error`, which can carry server-controlled bytes.
+    // Scrub before rendering. (REV round-11 finding.)
     Line::from(vec![
         Span::styled(badge, badge_style),
         Span::raw(" "),
-        Span::styled(msg.text.clone(), theme.footer),
+        Span::styled(scrub_terminal_unsafe(&msg.text), theme.footer),
     ])
 }
 
@@ -982,6 +995,71 @@ mod tests {
                 assert!(
                     !sym.as_bytes().iter().any(|b| *b == 0x1b || *b == 0x07),
                     "cell ({x},{y}) contains a control byte: {sym:?}",
+                );
+            }
+        }
+    }
+
+    /// Same protection extended to the kill-confirm footer line. A DB
+    /// user controlling `application_name`/`usename` would otherwise
+    /// inject ANSI/BEL bytes into the operator's terminal at the moment
+    /// they press `k`/`K` on that backend.
+    #[test]
+    fn kill_confirm_strips_ansi_escapes_from_row_fields() {
+        use crate::top::state::{ActivityRow, ServerSummary};
+        let mut app = App::new();
+        app.set_snapshot(Snapshot {
+            ts: 1,
+            server: ServerSummary::default(),
+            rows: vec![ActivityRow {
+                pid: 4242,
+                usename: "u\x1b[31m".into(),
+                datname: "d\x1b[2J".into(),
+                state: "active\x07".into(),
+                query: "select 1\x1b[33mPWNED".into(),
+                ..Default::default()
+            }],
+        });
+        app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('k'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
+            10,
+        );
+        assert!(app.kill_confirm.is_some(), "k must open the confirm");
+        let buf = render_into(140, 30, &app);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                assert!(
+                    !sym.as_bytes().iter().any(|b| *b == 0x1b || *b == 0x07),
+                    "cell ({x},{y}) leaked a control byte from the kill confirm: {sym:?}",
+                );
+            }
+        }
+    }
+
+    /// Same protection extended to the post-kill admin message footer.
+    /// `run_kill` builds the error text from `format!("{e}")` against a
+    /// `tokio_postgres::Error`, which can carry server-controlled bytes.
+    #[test]
+    fn admin_message_strips_ansi_escapes() {
+        use crate::top::state::{AdminMessage, AdminMessageLevel};
+        let mut app = App::new();
+        app.set_snapshot(fixture_snapshot());
+        app.admin_message = Some(AdminMessage {
+            text: "kill failed: server says \x1b[31mPWNED\x07".into(),
+            level: AdminMessageLevel::Err,
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+        let buf = render_into(140, 30, &app);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                assert!(
+                    !sym.as_bytes().iter().any(|b| *b == 0x1b || *b == 0x07),
+                    "cell ({x},{y}) leaked a control byte from admin message: {sym:?}",
                 );
             }
         }

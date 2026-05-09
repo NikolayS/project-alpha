@@ -552,7 +552,14 @@ impl App {
         let Some(snap) = self.snapshot.as_ref() else {
             return;
         };
-        let Some(row) = snap.rows.get(self.selected_row) else {
+        // The renderer sorts a fresh slice via `sort_rows` and the
+        // selection cursor indexes the *sorted* view, so the kill
+        // target has to come from the same sorted slice — otherwise
+        // pressing `k`/`K` confirms a different pid than the one
+        // highlighted (REV round-11 blocking finding).
+        let mut sorted: Vec<&ActivityRow> = snap.rows.iter().collect();
+        crate::top::views::activity::sort_rows(&mut sorted, self.sort_column, self.sort_desc);
+        let Some(&row) = sorted.get(self.selected_row) else {
             return;
         };
         // Don't try to kill background workers / non-client backends.
@@ -1160,6 +1167,55 @@ mod tests {
                 "Esc must not exit while kill prompt is open"
             );
         }
+    }
+
+    #[test]
+    fn k_targets_the_sorted_row_not_the_sql_row() {
+        // Two rows that disagree on SQL order vs `SortColumn::Pid`-asc
+        // order. The renderer sorts the slice in `views::activity` and
+        // the cursor indexes the *sorted* slice. `request_kill` must
+        // do the same — otherwise pressing `k` on the highlighted row
+        // confirms a kill against a different backend.
+        let mut app = App::new();
+        let snap = Snapshot {
+            ts: 1,
+            server: ServerSummary::default(),
+            rows: vec![
+                ActivityRow {
+                    pid: 7777,
+                    usename: "nik".into(),
+                    datname: "prod".into(),
+                    state: "active".into(),
+                    query: "select pg_sleep(60)".into(),
+                    ..Default::default()
+                },
+                ActivityRow {
+                    pid: 1111,
+                    usename: "nik".into(),
+                    datname: "prod".into(),
+                    state: "active".into(),
+                    query: "select 1".into(),
+                    ..Default::default()
+                },
+            ],
+        };
+        app.set_snapshot(snap);
+        // Sort by Pid ascending. Sorted slice is now [1111, 7777];
+        // SQL slice is still [7777, 1111].
+        app.sort_column = SortColumn::Pid;
+        app.sort_desc = false;
+        // Cursor on the second row of the sorted slice → pid 7777.
+        app.selected_row = 1;
+        app.handle_key(key(KeyCode::Char('k')), 10);
+        let req = app
+            .kill_confirm
+            .as_ref()
+            .expect("k must open the confirm prompt");
+        assert_eq!(
+            req.pid, 7777,
+            "kill confirm must target the sorted-slice row at selected_row, \
+             not snap.rows[selected_row]"
+        );
     }
 
     #[test]
