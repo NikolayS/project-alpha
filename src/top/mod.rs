@@ -68,9 +68,6 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
-        let mut stdout = io::stdout();
-        let _ = stdout.write_all(b"\x1b[H\x1b[2J\x1b[H");
-        let _ = stdout.flush();
         let _ = io::stderr().write_all(b"\x1b[r");
         let _ = io::stderr().flush();
     }
