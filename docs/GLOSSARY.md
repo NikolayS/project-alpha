@@ -17,10 +17,10 @@ point.
 - **Module** — anything with an interface and an implementation: a function, a struct + its `impl`, a file, a `mod`, a crate.
 - **Interface** — everything a caller must know to use the module: signatures, invariants, error modes, ordering, configuration. Not just types.
 - **Implementation** — the code inside the module.
-- **Depth** — leverage at the interface: lots of behaviour behind a small interface.
+- **Depth** — leverage at the interface: lots of behavior behind a small interface.
 - **Deep module** — small interface, large implementation. High leverage.
 - **Shallow module** — interface nearly as complex as the implementation. Low leverage; usually a pass-through.
-- **Seam** — where an interface lives; a place behaviour can be altered without editing in place.
+- **Seam** — where an interface lives; a place behavior can be altered without editing in place.
 - **Adapter** — a concrete type satisfying an interface at a seam.
 - **Leverage** — what callers gain from depth: terse, intent-shaped call sites.
 - **Locality** — what maintainers gain from depth: change, bugs, knowledge concentrated in one place.
@@ -64,7 +64,7 @@ design discussion and PR descriptions.
 - **Command Registry** — the table that maps a parsed `Command` to its handler. Replaces the two `match` statements in today's dispatchers.
 - **`CommandCtx`** — proposed bundle of execution dependencies (`client`, `params`, `settings`, `tx`) passed to every handler. Single place to extend handler capabilities.
 - **`MetaResult`** — the existing handler return enum (`Continue` / `Quit` / `Reconnected` / `ClearBuffer` / `PrintBuffer` / …). Stays.
-- **Category** — grouping of commands for behaviours that vary across them: AI, DBA, session, output, conditional, …. The token-budget gate becomes a property of the category, not a hand-curated list.
+- **Category** — grouping of commands for behaviors that vary across them: AI, DBA, session, output, conditional, …. The token-budget gate becomes a property of the category, not a hand-curated list.
 
 ## REPL state
 

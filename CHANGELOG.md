@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - 8 new describe commands: `\dP` (partitioned relations), `\dA`/`\dAc` (access methods / operator classes), `\dO` (collations), `\dF`/`\dFd`/`\dFp`/`\dFt` (text search objects) ([#806](https://github.com/NikolayS/rpg/pull/806))
   - `standard_conforming_strings` GUC tracking — fixes backslash parsing in `E''` strings ([#808](https://github.com/NikolayS/rpg/pull/808))
   - Async NOTICE/WARNING buffering for deterministic output ordering ([#807](https://github.com/NikolayS/rpg/pull/807))
-  - `rpg:file:line:` error location prefix matching psql's `-f` behaviour ([#803](https://github.com/NikolayS/rpg/pull/803))
+  - `rpg:file:line:` error location prefix matching psql's `-f` behavior ([#803](https://github.com/NikolayS/rpg/pull/803))
   - Wrapped format trailing-space and padding fixes ([#809](https://github.com/NikolayS/rpg/pull/809))
   - 3 previously skipped tests un-skipped: `copydml`, `transactions`, `plpgsql` ([#810](https://github.com/NikolayS/rpg/pull/810))
 - **WASM browser build (experimental).** rpg compiles to `wasm32-unknown-unknown` for browser use via WebSocket proxy. SQL queries, most `\` meta-commands, `/version`, `/dba`, and error reporting all work. Line editing with arrow keys, history, and Ctrl-U/K/W supported. See [`docs/WASM.md`](docs/WASM.md). ([#759](https://github.com/NikolayS/rpg/pull/759))
@@ -239,7 +239,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Connector config unified with daemon integration ([#481](https://github.com/NikolayS/rpg/pull/481))
 - Per-feature autonomy granularity replaces single global setting ([#527](https://github.com/NikolayS/rpg/pull/527))
 - Refactored to explicit Tokio runtime construction ([#541](https://github.com/NikolayS/rpg/pull/541))
-- Removed module-level `dead_code` suppressions in favour of targeted attributes ([#535](https://github.com/NikolayS/rpg/pull/535))
+- Removed module-level `dead_code` suppressions in favor of targeted attributes ([#535](https://github.com/NikolayS/rpg/pull/535))
 
 ### Fixed
 

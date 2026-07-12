@@ -15,7 +15,7 @@ namespace is unambiguous: if it starts with `/`, it is an rpg extension.
 
 ## psql-compatible `\` commands (keep as-is)
 
-These match psql behaviour and must not be changed:
+These match psql behavior and must not be changed:
 
 `\a`, `\c`, `\C`, `\cd`, `\copy`, `\d`, `\D`, `\db`, `\dc`, `\df`, `\di`,
 `\dl`, `\dn`, `\do`, `\dp`, `\ds`, `\dt`, `\dT`, `\du`, `\dv`, `\e`, `\echo`,
@@ -79,7 +79,7 @@ These match psql behaviour and must not be changed:
 | `/session resume <id>` | reconnect using a saved session |
 | `/refresh` | reload schema cache for tab completion |
 | `/log-file <path>` | start logging queries (no arg = stop) |
-| `/explain-share <service>` | upload last EXPLAIN plan to external visualiser |
+| `/explain-share <service>` | upload last EXPLAIN plan to external visualizer |
 | `/commands` | list custom Lua meta-commands |
 | `/version` | show rpg version and build information |
 | `/f2` | toggle schema-aware tab completion |

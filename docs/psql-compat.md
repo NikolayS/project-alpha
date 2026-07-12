@@ -6,7 +6,7 @@
 
 **222 of 232 PostgreSQL regression tests pass** (0 failures, 10 skipped) against a PostgreSQL 18 server; the skips are CI infrastructure limits or C extensions — not core compatibility issues.
 
-For everyday use — queries, `\d` commands, scripts, `\copy`, REPL — rpg is a safe drop-in.
+For everyday use — queries, `\d` commands, scripts, `\copy`, the REPL — rpg is a safe drop-in.
 
 ---
 
@@ -88,7 +88,7 @@ CI server: `postgres:18`. The `SKIP_ALWAYS` list in `tests/compat/test-psql-regr
 
 ### Describe commands (`\d` family)
 
-All describe commands produce output byte-identical to psql.
+All describe commands produce output byte-identical to psql's.
 
 | Command | Status | Tested | Description |
 |---------|--------|--------|-------------|
@@ -256,7 +256,7 @@ This is the other side of the compatibility story — rpg is a superset in these
 
 ### Command namespace
 
-rpg uses `/` for all its own commands and `\` exclusively for psql-compatible metacommands. This makes it unambiguous which commands are standard and which are extensions. `\dba`, `\sql`, `\plan` etc. are deprecated aliases that still work but print a migration hint.
+rpg uses `/` for all its own commands and `\` exclusively for psql-compatible metacommands. This makes it unambiguous which commands are standard and which are extensions. `\dba`, `\sql`, `\plan`, etc. are deprecated aliases that still work but print a migration hint.
 
 ---
 

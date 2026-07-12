@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-A psql-compatible terminal written in Rust with built-in DBA diagnostics and AI assistant.
+rpg is a psql-compatible Postgres terminal written in Rust, with built-in DBA diagnostics and an AI assistant.
 Single binary, no dependencies, cross-platform.
 
 ## Features
@@ -73,7 +73,7 @@ Anything that works in psql works here unchanged. Everything rpg adds uses `/`. 
 
 ## AI assistant
 
-Integrates with OpenAI, Anthropic, and Ollama:
+rpg integrates with OpenAI, Anthropic, and Ollama:
 
 ```sql
 -- Ask questions about your database
@@ -102,7 +102,7 @@ select * from orders where status = 'pending';
 
 ### /text2sql — natural language to SQL
 
-By default, the generated SQL is shown in a preview box and you confirm before it runs:
+By default, rpg shows the generated SQL in a preview box and asks for confirmation before running it:
 
 ```
 postgres=# /text2sql
@@ -392,9 +392,9 @@ rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 
 Supports PostgreSQL 14–18.
 
-rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree) in CI on every push. Both psql and rpg execute the same queries against the same server; outputs are normalized and diff'd — pass only if identical.
+rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree) in CI on every push. Both psql and rpg execute the same queries against the same server; outputs are normalized and diffed — a test passes only if they are identical.
 
-**222 of 232 PostgreSQL regression tests pass** (0 failures, 10 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
+**222 of 232 PostgreSQL regression tests pass** (0 failures, 10 skipped) against a PostgreSQL 18 server. The skips are due to CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
 
 → Full compatibility report: [`docs/psql-compat.md`](docs/psql-compat.md)
 

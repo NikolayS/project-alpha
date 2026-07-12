@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>rpg — browser terminal</title>
+  <meta name="description" content="Run rpg, a psql-compatible Postgres terminal with built-in DBA diagnostics, in your browser as a WebAssembly module connected to a Postgres server through a WebSocket proxy.">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -266,7 +267,7 @@
     // Load the WASM module.
     term.writeln('Loading rpg.wasm...');
     await init();
-    term.writeln('rpg.wasm loaded. Press \x1b[36mConnect\x1b[0m to start.');
+    term.writeln('rpg.wasm loaded. Click \x1b[36mConnect\x1b[0m to start.');
 
     connectBtn.addEventListener('click', async () => {
       connectBtn.disabled = true;
