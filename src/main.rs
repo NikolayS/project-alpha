@@ -362,7 +362,7 @@ struct Cli {
     #[arg(long, value_name = "LEVEL")]
     log_level: Option<String>,
 
-    /// Generate `rpg_ops` wrapper SQL and exit. Specify PG version (e.g. 14, 16).
+    /// Generate `rpg_ops` wrapper SQL and exit. Specify PG version (e.g., 14, 16).
     #[arg(long, value_name = "PG_VERSION", default_missing_value = "16", num_args = 0..=1)]
     generate_wrappers: Option<String>,
 

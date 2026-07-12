@@ -148,7 +148,7 @@ Unit tests live next to the code they test (in `#[cfg(test)]` modules).
 just test-integration
 ```
 
-Integration tests require a running Postgres instance. Docker is used to spin up ephemeral containers. Tests in the `tests/` directory with the `integration` feature gate.
+Integration tests require a running Postgres instance. Docker is used to spin up ephemeral containers. The tests live in the `tests/` directory behind the `integration` feature gate.
 
 ## Cross-compilation
 

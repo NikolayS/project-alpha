@@ -1,12 +1,12 @@
 <!-- Copyright 2026 Nikolay Samokhvalov / postgres.ai -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# rpg WASM — Browser Build (Experimental)
+# rpg WASM: browser build (experimental)
 
 > **Status: Experimental.** The WASM build is functional for interactive SQL
 > and most meta-commands, but some features are unavailable due to platform
 > constraints (no filesystem, no shell, no ratatui). See
-> [Known Limitations](#known-limitations) below.
+> [Known limitations](#known-limitations) below.
 
 Run rpg in the browser as a WebAssembly module. SQL queries, meta-commands,
 and rpg diagnostics work against a real Postgres server via a WebSocket proxy.
@@ -37,7 +37,7 @@ protocol negotiation. Because the underlying `WsIo` type is `!Send`, the
 connection driver runs on `wasm_bindgen_futures::spawn_local` instead of
 `tokio::spawn`.
 
-## Quick Start
+## Quick start
 
 ### 1. Install prerequisites
 
@@ -86,7 +86,7 @@ cd wasm && python3 -m http.server 8080
 Navigate to `http://localhost:8080`. Enter connection details in the toolbar
 and click **Connect**.
 
-## What Works
+## What works
 
 - **SQL queries** with psql-style tabular formatting (`\x` expanded mode supported)
 - **Meta-commands:** `\d`, `\dt`, `\dn`, `\du`, `\di`, `\dv`, `\df`, `\l`, `\conninfo`, `\timing`, `\x`, `\set`, `\echo`, `\?`
@@ -95,10 +95,10 @@ and click **Connect**.
 - **Line editing:** arrow keys, command history (Up/Down), Ctrl-U/K/W/L, Home/End, Delete, Backspace
 - **Connection** to any Postgres 14-18 server via the WebSocket proxy
 
-## Known Limitations
+## Known limitations
 
 Commands that require native OS facilities show a friendly error message
-instead of panicking — e.g. `\i: file include is not available on
+instead of panicking, for example `\i: file include is not available on
 wasm32-unknown-unknown (no filesystem)`.
 
 | Feature | Reason |
@@ -121,7 +121,7 @@ wasm32-unknown-unknown (no filesystem)`.
 | AI commands (`/ask`, `/fix`, `/explain`, `/optimize`) | Require `reqwest` streaming, which is limited on WASM |
 | Multi-statement command tags | When multiple statements are sent in one line, the command tag from the first is reused for subsequent ones (cosmetic, queries execute correctly) |
 
-## Output Routing
+## Output routing
 
 Standard `println!` / `eprintln!` write to file descriptors 1 and 2, which are
 sinks on `wasm32-unknown-unknown` (there is no OS). rpg uses custom macros to
@@ -169,11 +169,11 @@ invisible to native `cargo check` / `cargo test`.
 `wasm/build-rpg-wasm.sh` automates the full build:
 
 1. Installs `wasm-pack` if missing
-2. Ensures `wasm32-unknown-unknown` target is added
+2. Ensures the `wasm32-unknown-unknown` target is added
 3. Runs `wasm-pack build --target web --release --features wasm`
 4. Optionally runs `wasm-opt -Oz` (from binaryen) for size optimization
 
-## WebSocket Proxy
+## WebSocket proxy
 
 `wasm/ws-proxy.js` is a Node.js process that bridges WebSocket connections from
 the browser to a Postgres TCP socket. One TCP connection is created per

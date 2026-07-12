@@ -266,7 +266,7 @@
     // Load the WASM module.
     term.writeln('Loading rpg.wasm...');
     await init();
-    term.writeln('rpg.wasm loaded. Press \x1b[36mConnect\x1b[0m to start.');
+    term.writeln('rpg.wasm loaded. Click \x1b[36mConnect\x1b[0m to start.');
 
     connectBtn.addEventListener('click', async () => {
       connectBtn.disabled = true;
