@@ -701,7 +701,7 @@ mod tests {
         match result.unwrap() {
             LiveSnapshotResult::Ok(snap) => {
                 // Snapshot should have valid structure (counts may be 0).
-                assert!(snap.active_count == snap.by_type.values().sum::<u32>());
+                assert_eq!(snap.active_count, snap.by_type.values().sum::<u32>());
             }
             LiveSnapshotResult::Missed => {
                 panic!("unexpected Missed with timeout disabled");

@@ -2068,7 +2068,7 @@ protected_tables = ["users", "payments", "audit_log"]
         // when we are outside the home directory tree.
         if let Some(path) = found {
             // A .rpg.toml exists somewhere above the temp dir — that is fine.
-            assert!(path.file_name().unwrap() == ".rpg.toml");
+            assert_eq!(path.file_name().unwrap(), ".rpg.toml");
         }
     }
 
