@@ -1285,6 +1285,13 @@ pub struct ReplSettings {
     ///
     /// Set by `--no-highlight` CLI flag or `\set HIGHLIGHT off`.
     pub no_highlight: bool,
+    /// Show a temporary on-screen badge for every key press in TUI
+    /// commands. Off by default — turned on globally by the
+    /// `--show-keys` CLI flag. The intent is to record animated GIFs
+    /// / asciinema demos of arbitrary rpg commands with the keystroke
+    /// labelled on screen. Currently honored by `/top`; later sprints
+    /// extend it to `/ash` and the bare REPL prompt.
+    pub show_keys: bool,
     /// Disable schema-aware tab completion in the interactive REPL.
     ///
     /// Toggled by the F2 key or `\f2` metacommand.
@@ -1674,6 +1681,7 @@ impl Default for ReplSettings {
             pending_pset_opts: Vec::new(),
             named_statements: HashSet::new(),
             no_highlight: false,
+            show_keys: false,
             no_completion: false,
             // Pager is enabled by default in interactive mode.
             pager_enabled: true,
@@ -1795,11 +1803,24 @@ pub fn startup_file() -> Option<PathBuf> {
 // Non-interactive (piped / -c / -f) execution
 // ---------------------------------------------------------------------------
 
+/// Returns `true` when the input string starts (after any leading
+/// whitespace) with a `/` — the rpg-extension command namespace
+/// (`/top`, `/dba`, `/ash`, `/ask`, …). See `docs/COMMANDS.md` for the
+/// `\` vs `/` namespace policy.
+///
+/// Used by [`exec_command`] to route `-c` / stdin invocations through
+/// `dispatch_ai_command` instead of letting them fall through to SQL
+/// execution (where they would raise a `syntax error at or near "/"`).
+pub fn is_slash_extension_command(sql: &str) -> bool {
+    sql.trim_start().starts_with('/')
+}
+
 /// Execute a single SQL command string (from `-c`) and exit.
 ///
 /// Mirrors psql behaviour: if the string starts with a backslash it is
 /// dispatched as a meta-command (using only the first line as the command,
-/// matching psql's `-c` meta-command handling).  Otherwise it is sent as SQL.
+/// matching psql's `-c` meta-command handling). If it starts with a slash
+/// it is dispatched as an rpg-extension command. Otherwise it is sent as SQL.
 pub async fn exec_command(
     client: &Client,
     sql: &str,
@@ -1848,6 +1869,22 @@ pub async fn exec_command(
             }
             _ => {}
         }
+        return 0;
+    }
+    if is_slash_extension_command(sql) {
+        // Slash (rpg-extension) command in -c mode. Mirrors the interactive
+        // REPL's branch around `dispatch_ai_command`; without this `rpg
+        // --command "/top --once"` would fall through to SQL execution and
+        // raise a syntax error.
+        //
+        // KNOWN LIMITATION: this path always returns 0, even when
+        // dispatch_ai_command prints "Unknown command:" to stderr or when a
+        // /-command's internal handler errors. Distinguishing matched vs
+        // unmatched needs a richer return type from dispatch_ai_command and
+        // is tracked as a follow-up (see PR #837 review B1).
+        let mut tx = TxState::default();
+        let interpolated = settings.vars.interpolate(sql.trim());
+        let _ = dispatch_ai_command(&interpolated, client, params, settings, &mut tx).await;
         return 0;
     }
     let mut tx = TxState::default();
@@ -3428,6 +3465,7 @@ AI commands:
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
   /ash              show live Active Session History (poll pg_stat_activity; uses pg_ash if installed)
+  /top              live TUI Postgres monitor (top-like; --once / --batch for non-interactive)
 
 DBA diagnostics:
   /dba               show available diagnostics
@@ -10876,6 +10914,26 @@ mod tests {
     }
 
     // -- quit/exit in non-interactive (exec_lines / piped) path ---------------
+
+    // -- /-extension command predicate (used by exec_command's -c routing) ---
+
+    #[test]
+    fn slash_predicate_recognises_rpg_extensions() {
+        assert!(is_slash_extension_command("/top"));
+        assert!(is_slash_extension_command("/top --once"));
+        assert!(is_slash_extension_command("/dba activity"));
+        assert!(is_slash_extension_command("  /ash"));
+        assert!(is_slash_extension_command("\t/ask hello"));
+    }
+
+    #[test]
+    fn slash_predicate_rejects_sql_and_backslash() {
+        assert!(!is_slash_extension_command(""));
+        assert!(!is_slash_extension_command("select 1"));
+        assert!(!is_slash_extension_command("\\d"));
+        // A `/` mid-statement is SQL division, not a command.
+        assert!(!is_slash_extension_command("select 10/2"));
+    }
 
     /// Simulate `exec_lines` processing a single "quit" line with an empty
     /// buffer.  The loop must break immediately — no SQL dispatched.

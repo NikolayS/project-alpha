@@ -1,0 +1,74 @@
+{
+  "$schema": "https://raw.githubusercontent.com/NikolayS/samospec/main/schemas/architecture.schema.json",
+  "version": "0.2",
+  "slug": "top",
+  "title": "rpg /top — live TUI Postgres monitor",
+  "groups": [
+    { "id": "ui",      "label": "ratatui UI"          },
+    { "id": "core",    "label": "/top core"           },
+    { "id": "data",    "label": "data plane"          },
+    { "id": "ai",      "label": "AI hand-offs"        },
+    { "id": "rpg",     "label": "rpg host"            },
+    { "id": "pg",      "label": "PostgreSQL 14–18"    }
+  ],
+  "nodes": [
+    { "id": "repl",       "group": "rpg",  "label": "REPL / metacmd dispatcher", "kind": "module" },
+    { "id": "clap",       "group": "rpg",  "label": "clap subcommand: rpg top",  "kind": "module" },
+    { "id": "log",        "group": "rpg",  "label": "session log (audit)",       "kind": "module" },
+    { "id": "highlight",  "group": "rpg",  "label": "syntax highlighter",        "kind": "module" },
+    { "id": "ai_cmds",    "group": "ai",   "label": "src/repl/ai_commands.rs",   "kind": "module" },
+    { "id": "ai_explain", "group": "ai",   "label": "Shift-X — eXplain selection", "kind": "feature" },
+    { "id": "ai_info",    "group": "ai",   "label": "Shift-I — Info on whole view","kind": "feature" },
+
+    { "id": "modrs",      "group": "core", "label": "src/top/mod.rs (lifecycle)", "kind": "module" },
+    { "id": "state",      "group": "core", "label": "state.rs (App, ringbuf, filter, sort)", "kind": "module" },
+    { "id": "keys",       "group": "core", "label": "keys.rs (keymap)",          "kind": "module" },
+    { "id": "theme",      "group": "core", "label": "theme.rs (palette, thresholds)", "kind": "module" },
+    { "id": "admin",      "group": "core", "label": "admin.rs (cancel/terminate, bulk)", "kind": "module" },
+
+    { "id": "renderer",   "group": "ui",   "label": "renderer.rs (draw frame)",  "kind": "module" },
+    { "id": "views",      "group": "ui",   "label": "views/* (per-view render+SQL)", "kind": "module" },
+    { "id": "overlay",    "group": "ui",   "label": "overlay.rs (drill-down, modals, help)", "kind": "module" },
+
+    { "id": "sampler",    "group": "data", "label": "sampler.rs (tokio task)",   "kind": "module" },
+    { "id": "sql",        "group": "data", "label": "sql.rs (PG-version-gated SQL)", "kind": "module" },
+    { "id": "pgconn",     "group": "data", "label": "tokio-postgres connection (shared)", "kind": "module" },
+
+    { "id": "pgstats",    "group": "pg",   "label": "pg_stat_* views",           "kind": "external" },
+    { "id": "pglocks",    "group": "pg",   "label": "pg_locks / pg_blocking_pids", "kind": "external" },
+    { "id": "pgprogress", "group": "pg",   "label": "pg_stat_progress_*",        "kind": "external" },
+    { "id": "pgrepl",     "group": "pg",   "label": "pg_stat_replication / slots", "kind": "external" }
+  ],
+  "edges": [
+    { "from": "repl",     "to": "modrs",    "label": "/top dispatch" },
+    { "from": "clap",     "to": "modrs",    "label": "rpg top alias" },
+    { "from": "overlay",  "to": "ai_explain","label": "Shift-X" },
+    { "from": "renderer", "to": "ai_info",  "label": "Shift-I (bottom panel)" },
+    { "from": "ai_explain","to": "ai_cmds", "label": "/explain on selected pid" },
+    { "from": "ai_info",  "to": "ai_cmds",  "label": "Info prompt (header + rows + waits)" },
+    { "from": "modrs",    "to": "state",    "label": "owns App" },
+    { "from": "modrs",    "to": "sampler",  "label": "spawn task" },
+    { "from": "modrs",    "to": "renderer", "label": "draw loop" },
+    { "from": "modrs",    "to": "keys",     "label": "key → action" },
+    { "from": "renderer", "to": "views",    "label": "delegate per view" },
+    { "from": "renderer", "to": "overlay",  "label": "modal stack" },
+    { "from": "renderer", "to": "theme",    "label": "palette + truecolor" },
+    { "from": "overlay",  "to": "highlight","label": "query syntax" },
+    { "from": "sampler",  "to": "sql",      "label": "fetch query strings" },
+    { "from": "sampler",  "to": "pgconn",   "label": "execute" },
+    { "from": "sampler",  "to": "state",    "label": "Snapshot" },
+    { "from": "admin",    "to": "pgconn",   "label": "pg_cancel / pg_terminate" },
+    { "from": "admin",    "to": "log",      "label": "audit line" },
+    { "from": "pgconn",   "to": "pgstats",  "label": "SELECT" },
+    { "from": "pgconn",   "to": "pglocks",  "label": "SELECT" },
+    { "from": "pgconn",   "to": "pgprogress","label": "SELECT" },
+    { "from": "pgconn",   "to": "pgrepl",   "label": "SELECT" }
+  ],
+  "notes": [
+    "All /top mutating actions (cancel/terminate, EXPLAIN ANALYZE) are gated by an explicit modal confirmation and an audit line.",
+    "Sampler queries always run with SET LOCAL statement_timeout = '5s' to avoid wedging on hostile locks.",
+    "v1 ships with no system-stats collection (no procfs, no server-side helpers); the header omits cpu/mem/io/net cells. Reintroduction is a separate spec.",
+    "Compiled out on wasm32; /top is a native-only command (matches /ash, /rpg).",
+    "Module layout intentionally mirrors src/ash/{mod,renderer,sampler,state}.rs for reviewer pattern-matching."
+  ]
+}
